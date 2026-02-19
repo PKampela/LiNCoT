@@ -8,6 +8,7 @@ from typing import Optional, cast
 import numpy as np
 
 from ..core.frames import CoordinateFrame
+from ..core.image import Image
 from ..core.transform import Transform
 from nibabel.nifti1 import Nifti1Image
 
@@ -31,6 +32,16 @@ def load_nifti(path: str) -> MRIImageInfo:
     img = cast(Nifti1Image, loadsave.load(path))
     affine = np.asarray(img.affine, dtype=float)
     return MRIImageInfo(path=path, shape=img.shape, affine=affine)
+
+
+def load_nifti_image(path: str, frame: CoordinateFrame) -> Image:
+    """Load a NIfTI image and return data with affine and frame."""
+    from nibabel import loadsave
+
+    img = cast(Nifti1Image, loadsave.load(path))
+    data = np.asarray(img.dataobj)
+    affine = np.asarray(img.affine, dtype=float)
+    return Image(data=data, affine=affine, frame=frame)
 
 
 def _select_affine(info: MRIImageInfo, sform: Optional[np.ndarray], qform: Optional[np.ndarray]) -> np.ndarray:

@@ -1,8 +1,8 @@
 import numpy as np
 import pytest
 
-from tmscoords.core.frames import CoordinateFrame
-from tmscoords.core.point import Point
+from ..core.frames import CoordinateFrame
+from ..core.point import Point
 
 
 def test_frame_equality_by_name_and_axes():

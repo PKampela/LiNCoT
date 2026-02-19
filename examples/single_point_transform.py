@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import numpy as np
 
-from tmscoords.core.chain import TransformChain
-from tmscoords.core.frames import CoordinateFrame
-from tmscoords.core.point import Point
-from tmscoords.core.transform import Transform
+from ..core.chain import TransformChain
+from ..core.frames import CoordinateFrame
+from ..core.point import Point
+from ..core.transform import Transform
 
 
 def main() -> None:

@@ -12,9 +12,9 @@ A lightweight coordinate transformation tool for TMS workflows. This project wra
 ## Quick example
 
 ```python
-from tmscoords.core.frames import CoordinateFrame
-from tmscoords.core.point import Point
-from tmscoords.core.transform import Transform
+from ..core.frames import CoordinateFrame
+from ..core.point import Point
+from ..core.transform import Transform
 
 import numpy as np
 
@@ -29,6 +29,18 @@ print(result.coords)
 
 ## CLI (minimal)
 
+By default, the CLI looks for a transform registry named `transforms.json` in the
+current working directory and auto-resolves a valid transform chain.
+
+```
+python -m tmscoords.cli.main transform \
+  --point 12 34 56 \
+  --from head \
+  --to mni
+```
+
+To override resolution with an explicit chain:
+
 ```
 python -m tmscoords.cli.main transform \
   --point 12 34 56 \
@@ -38,4 +50,9 @@ python -m tmscoords.cli.main transform \
   --transform-name head_to_mri mri_to_mni
 ```
 
-Use `--show-matrix` to print the composed matrix.
+Optional flags:
+
+- `--show-matrix`: print the composed affine matrix.
+- `--show-chain`: print a concise summary of the chain used.
+- `--explain`: narrate how the chain was resolved.
+- `--json`: emit structured JSON output instead of text.
