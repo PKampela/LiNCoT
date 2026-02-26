@@ -16,7 +16,8 @@ from ..core.frames import CoordinateFrame
 from ..core.point import Point
 from ..registry.frames import FrameRegistry, default_frames
 from ..registry.transforms import TransformRegistry
-from ..core.session import Session 
+from ..core.session import Session
+from ..backends.nibabel_backend import load_nifti_image, voxel_to_world_transform, load_nifti 
 
 
 class TransformResolutionError(ValueError):
@@ -308,6 +309,103 @@ def _cmd_transform(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_load_volume(args: argparse.Namespace, session: Session) -> int:
+    """Load a NIfTI volume into the session."""
+    frames_registry = session.frames if session.frames.list_frames() else _build_default_frame_registry()
+    
+    # Get the frame or use default
+    frame_name = args.frame or "scanner"
+    try:
+        if frame_name not in frames_registry.list_frames():
+            if args.json:
+                _emit_output({"error": {"message": f"Unknown frame: {frame_name}"}}, [], True)
+            else:
+                print(f"Unknown frame: {frame_name}", file=sys.stderr)
+            return 2
+        frame = frames_registry.get_frame(frame_name)
+    except KeyError:
+        if args.json:
+            _emit_output({"error": {"message": f"Unknown frame: {frame_name}"}}, [], True)
+        else:
+            print(f"Unknown frame: {frame_name}", file=sys.stderr)
+        return 2
+
+    # Load the NIfTI file
+    try:
+        image = load_nifti_image(args.path, frame)
+    except Exception as exc:
+        if args.json:
+            _emit_output({"error": {"message": f"Failed to load NIfTI file: {exc}"}}, [], True)
+        else:
+            print(f"Failed to load NIfTI file: {exc}", file=sys.stderr)
+        return 2
+
+    # Add to session
+    volume_name = args.name or Path(args.path).stem
+    session.add_image(volume_name, image)
+    
+    # Register the frame if not already in session
+    if frame_name not in session.frames.list_frames():
+        session.add_frame(frame)
+
+    # Optionally create and register voxel-to-world transform
+    if args.register_transform:
+        try:
+            # Load image info for transform creation
+            info = load_nifti(args.path)
+            
+            # Create voxel frame if not exists
+            voxel_frame_name = f"{volume_name}_voxel"
+            voxel_frame = CoordinateFrame(name=voxel_frame_name, axes=("i", "j", "k"), units="voxel")
+            session.add_frame(voxel_frame)
+            
+            # Create and register transform
+            transform = voxel_to_world_transform(info, voxel_frame, frame)
+            transform_name = args.transform_name or f"{volume_name}_voxel_to_{frame_name}"
+            session.add_transform(transform_name, transform)
+            
+            transform_info = {
+                "transform_name": transform_name,
+                "source": voxel_frame_name,
+                "target": frame_name,
+            }
+        except Exception as exc:
+            if args.json:
+                _emit_output({"error": {"message": f"Failed to register transform: {exc}"}}, [], True)
+            else:
+                print(f"Warning: Failed to register transform: {exc}", file=sys.stderr)
+            transform_info = None
+    else:
+        transform_info = None
+
+    # Build output
+    payload: Dict[str, object] = {
+        "volume": {
+            "name": volume_name,
+            "path": args.path,
+            "shape": image.shape,
+            "frame": frame.name,
+            "affine_shape": image.affine.shape,
+        }
+    }
+    
+    if transform_info:
+        payload["transform"] = transform_info
+
+    text_lines: List[str] = [
+        f"Loaded volume '{volume_name}' from {args.path}",
+        f"  Shape: {image.shape}",
+        f"  Frame: {frame.name}",
+        f"  Affine shape: {image.affine.shape}",
+    ]
+    
+    if transform_info:
+        text_lines.append(f"  Registered transform: {transform_info['transform_name']}")
+
+    _emit_output(payload, text_lines, args.json)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="tmscoords")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -324,14 +422,28 @@ def build_parser() -> argparse.ArgumentParser:
     transform_parser.add_argument("--json", action="store_true")
     transform_parser.set_defaults(func=_cmd_transform)
 
+    load_volume_parser = subparsers.add_parser("load-volume", help="Load a NIfTI volume into the session")
+    load_volume_parser.add_argument("path", help="Path to the NIfTI file")
+    load_volume_parser.add_argument("--name", help="Name for the volume in the session (default: filename stem)")
+    load_volume_parser.add_argument("--frame", help="Coordinate frame for the volume (default: scanner)")
+    load_volume_parser.add_argument("--register-transform", action="store_true", help="Register voxel-to-world transform")
+    load_volume_parser.add_argument("--transform-name", help="Name for the registered transform")
+    load_volume_parser.add_argument("--json", action="store_true")
+    load_volume_parser.set_defaults(func=_cmd_load_volume)
+
     return parser
 
 
 def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
-    session = Session(subject_id="default", description="Example session" )
-    return args.func(args, session)
+    session = Session(subject_id="default", description="Example session")
+    if hasattr(args, 'func'):
+        if args.command == 'transform':
+            return args.func(args)
+        else:
+            return args.func(args, session)
+    return 1
 
 
 if __name__ == "__main__":
