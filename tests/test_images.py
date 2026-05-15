@@ -1,8 +1,8 @@
 import numpy as np
 
-from ..core.frames import CoordinateFrame
-from ..core.image import Image, transform_image
-from ..core.transform import Transform
+from core.frames import CoordinateFrame
+from core.image import Image, transform_image
+from core.transform import Transform
 
 
 def _frame(name: str) -> CoordinateFrame:

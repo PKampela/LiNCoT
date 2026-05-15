@@ -1,10 +1,10 @@
 import numpy as np
 import pytest
 
-from ..core.chain import TransformChain
-from ..core.frames import CoordinateFrame
-from ..core.point import Point
-from ..core.transform import Transform
+from core.chain import TransformChain
+from core.frames import CoordinateFrame
+from core.point import Point
+from core.transform import Transform
 
 
 def _frame(name: str) -> CoordinateFrame:

@@ -1,4 +1,4 @@
-name: tmscoords
+name: tmslabs
 channels:
   - conda-forge
   - defaults

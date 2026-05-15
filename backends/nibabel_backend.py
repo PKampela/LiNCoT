@@ -7,9 +7,9 @@ from typing import Optional, cast
 
 import numpy as np
 
-from ..core.frames import CoordinateFrame
-from ..core.image import Image
-from ..core.transform import Transform
+from core.frames import CoordinateFrame
+from core.image import Image
+from core.transform import Transform
 from nibabel.nifti1 import Nifti1Image
 
 

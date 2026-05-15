@@ -4,14 +4,14 @@ from nibabel.nifti1 import Nifti1Image
 from nibabel.loadsave import save
 from pathlib import Path
 
-from ..core.frames import CoordinateFrame
-from ..core.point import Point
-from ..core.transform import Transform
-from ..backends.nibabel_backend import (
+from backends.nibabel_backend import (
     load_nifti,
     voxel_to_world_transform,
     world_to_voxel_transform,
 )
+from core.frames import CoordinateFrame
+from core.point import Point
+from core.transform import Transform
 
 
 def test_identity_transform():

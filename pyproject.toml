@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tmscoords"
+version = "0.1.0"
+description = "TMS coordinate transformation tool"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "mne",
+    "nibabel",
+    "numpy",
+    "PySide6",
+    "pyvista",
+    "pyvistaqt",
+    "scipy",
+]
+
+[project.scripts]
+tmscoords = "launcher:main"
+
+[tool.setuptools]
+py-modules = ["launcher"]
+
+[tool.setuptools.packages.find]
+include = ["core*", "cli*", "gui*", "registry*", "backends*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
