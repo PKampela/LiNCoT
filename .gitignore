@@ -1,0 +1,7 @@
+dataset/
+bem/
+surfaces/
+*.nii
+*.nii.gz
+*.fif
+*.surf
