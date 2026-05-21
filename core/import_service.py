@@ -6,15 +6,18 @@ Handles format detection, subject-specific frame naming, and validation.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import numpy as np
 
+from .frames import CoordinateFrame
+from .transform import Transform
+
 if TYPE_CHECKING:
     from .image import Image
     from .session import Session
-    from .transform import Transform
 
 
 class ImportError(Exception):
@@ -61,7 +64,71 @@ def _unique_name(preferred: str, existing: list[str]) -> str:
     return f"{preferred}_{index}"
 
 
-def import_transform(session: Session, path: str) -> tuple[Transform, str]:
+def _extract_xfm_payload(path: str) -> tuple[list[str], np.ndarray]:
+    """Extract metadata lines and the affine matrix from an .xfm file.
+
+    The file format is loosely structured: top metadata/comment lines are preserved
+    for display, then the Linear_Transform block is parsed into a 4x4 affine.
+    """
+
+    lines = Path(path).read_text(encoding="utf-8").splitlines()
+    metadata_lines: list[str] = []
+    matrix_rows: list[list[float]] = []
+    in_linear_block = False
+
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not in_linear_block:
+            if line.startswith("Linear_Transform"):
+                in_linear_block = True
+            else:
+                metadata_lines.append(raw_line)
+            continue
+
+        if not line or line.startswith("#") or line.startswith(";"):
+            continue
+
+        if line.endswith(";"):
+            line = line[:-1].strip()
+
+        if not line:
+            continue
+
+        values = [float(value) for value in re.split(r"\s+", line) if value]
+        if values:
+            matrix_rows.append(values)
+
+    if not matrix_rows:
+        raise ImportError(f"No Linear_Transform matrix found in .xfm file: {path}")
+
+    row_lengths = {len(row) for row in matrix_rows}
+    if row_lengths - {4}:
+        raise ImportError(
+            f"Invalid .xfm transform rows in {Path(path).name}: expected rows of 4 values"
+        )
+
+    if len(matrix_rows) == 3:
+        matrix_rows.append([0.0, 0.0, 0.0, 1.0])
+    elif len(matrix_rows) != 4:
+        raise ImportError(
+            f"Invalid .xfm transform in {Path(path).name}: expected 3 or 4 rows, got {len(matrix_rows)}"
+        )
+
+    matrix = np.asarray(matrix_rows, dtype=float)
+    if matrix.shape != (4, 4):
+        raise ImportError(
+            f"Invalid .xfm transform in {Path(path).name}: expected a 4x4 matrix, got {matrix.shape}"
+        )
+
+    return metadata_lines, matrix
+
+
+def import_transform(
+    session: Session,
+    path: str,
+    source_frame_name: str | None = None,
+    target_frame_name: str | None = None,
+) -> tuple[Transform, str]:
     """Import a transform from file into session.
 
     Routes to appropriate backend based on file extension.
@@ -86,10 +153,16 @@ def import_transform(session: Session, path: str) -> tuple[Transform, str]:
 
     if ext == "fif":
         return _import_transform_fif(session, path)
+    if ext == "xfm":
+        if source_frame_name is None or target_frame_name is None:
+            raise ImportError(
+                "XFM transforms require explicit source and target frames"
+            )
+        return _import_transform_xfm(session, path, source_frame_name, target_frame_name)
     else:
         raise UnsupportedFormatError(
             f"Unsupported transform format: .{ext}\n"
-            f"Supported formats: .fif"
+            f"Supported formats: .fif, .xfm"
         )
 
 
@@ -162,6 +235,82 @@ def _import_transform_fif(session: Session, path: str) -> tuple[Transform, str]:
     return transform, info_msg
 
 
+def preview_xfm_transform(path: str) -> tuple[list[str], np.ndarray]:
+    """Read an .xfm file without importing it, for GUI preview/prompting."""
+
+    path_obj = Path(path)
+    if not path_obj.exists():
+        raise ImportError(f"File not found: {path}")
+
+    if get_file_extension(path) != "xfm":
+        raise UnsupportedFormatError(f"Unsupported transform format preview: {Path(path).suffix}")
+
+    return _extract_xfm_payload(path)
+
+
+def format_xfm_preview(metadata_lines: list[str], matrix: np.ndarray) -> str:
+    """Format .xfm metadata and affine matrix for display."""
+
+    preview_lines = [line for line in metadata_lines if line.strip()]
+    preview_lines.append("Affine matrix:")
+    preview_lines.extend(
+        "  " + " ".join(f"{value: .6f}" for value in row)
+        for row in matrix
+    )
+    return "\n".join(preview_lines)
+
+
+def _import_transform_xfm(
+    session: Session,
+    path: str,
+    source_frame_name: str,
+    target_frame_name: str,
+) -> tuple[Transform, str]:
+    """Import a loosely structured .xfm transform file."""
+
+    metadata_lines, matrix = _extract_xfm_payload(path)
+
+    def _get_or_create_frame(frame_name: str, role: str) -> tuple[CoordinateFrame, bool]:
+        try:
+            return session.get_frame(frame_name), False
+        except KeyError:
+            frame = CoordinateFrame(
+                name=frame_name,
+                axes=("R", "A", "S"),
+                units="mm",
+                description=f"Created for imported .xfm {role} frame",
+            )
+            session.add_frame(frame)
+            return frame, True
+
+    source_frame, source_created = _get_or_create_frame(source_frame_name, "source")
+    target_frame, target_created = _get_or_create_frame(target_frame_name, "target")
+
+    transform = Transform(source=source_frame, target=target_frame, matrix=matrix)
+    _validate_transform(transform)
+
+    transform_name = _unique_name(f"import_{Path(path).stem}", session.transforms.list_transforms())
+    session.add_transform(transform_name, transform)
+
+    info_lines = [
+        f"Imported transform: {transform_name}",
+        f"  Source: {source_frame_name}",
+        f"  Target: {target_frame_name}",
+        f"  File: {Path(path).name}",
+    ]
+    if source_created:
+        info_lines.append(f"  Created source frame: {source_frame_name}")
+    if target_created:
+        info_lines.append(f"  Created target frame: {target_frame_name}")
+    if metadata_lines:
+        info_lines.append("  Metadata:")
+        info_lines.extend([f"    {line}" for line in metadata_lines if line.strip()])
+    info_lines.append("  Affine matrix:")
+    info_lines.extend([f"    {' '.join(f'{value: .6f}' for value in row)}" for row in matrix])
+
+    return transform, "\n".join(info_lines)
+
+
 def _import_nifti_image(session: Session, path: str) -> tuple["Image", str]:
     """Import a NIfTI MRI image with subject-specific frames and transforms."""
 
@@ -208,9 +357,6 @@ def _import_nifti_image(session: Session, path: str) -> tuple["Image", str]:
 
     forward_name = _unique_name(f"{image_name}_voxel_to_mri", session.transforms.list_transforms())
     session.add_transform(forward_name, transform)
-
-    inverse_name = _unique_name(f"{image_name}_mri_to_voxel", session.transforms.list_transforms())
-    session.add_transform(inverse_name, transform.invert())
 
     try:
         import nibabel as nib
@@ -286,6 +432,7 @@ def _validate_transform(transform: Transform) -> None:
 
 __all__ = [
     "import_transform",
+    "preview_xfm_transform",
     "import_image",
     "get_file_extension",
     "ImportError",

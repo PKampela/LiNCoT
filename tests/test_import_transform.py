@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 
 from core.frames import CoordinateFrame
-from core.import_service import ImportError, UnsupportedFormatError
+from core.import_service import ImportError, UnsupportedFormatError, format_xfm_preview, preview_xfm_transform
 from core.point import Point
 from core.session import Session
 
@@ -64,6 +64,90 @@ def test_import_unsupported_format():
             session.import_transform(temp_path)
     finally:
         Path(temp_path).unlink()
+
+
+def test_import_xfm_transform(tmp_path):
+    """Test importing a loosely structured .xfm transform file."""
+    session = Session(subject_id="test", description="Import test")
+
+    xfm_path = tmp_path / "talairach.xfm"
+    xfm_path.write_text(
+        "\n".join(
+            [
+                "MNI Transform File",
+                "% avi2talxfm",
+                "",
+                "Transform_Type = Linear;",
+                "Linear_Transform = ",
+                "1.022485 -0.008449 -0.036217 5.597427",
+                "0.071071 0.914866 0.406098 -19.815094",
+                "0.008756 -0.433700 1.028119 -1.547623;",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    transform, info = session.import_transform(
+        str(xfm_path),
+        source_frame_name="T1_mri",
+        target_frame_name="talairach",
+    )
+
+    assert transform.source.name == "T1_mri"
+    assert transform.target.name == "talairach"
+    assert transform.matrix.shape == (4, 4)
+    assert np.allclose(transform.matrix[3], [0.0, 0.0, 0.0, 1.0])
+    assert "T1_mri" in session.frames.list_frames()
+    assert "talairach" in session.frames.list_frames()
+    assert "Created source frame" in info
+    assert "Created target frame" in info
+    assert "Imported transform" in info
+    assert "avi2talxfm" in info
+
+
+def test_preview_xfm_transform_preserves_metadata(tmp_path):
+    """Test reading .xfm metadata lines before import."""
+    xfm_path = tmp_path / "talairach.xfm"
+    xfm_path.write_text(
+        "\n".join(
+            [
+                "MNI Transform File",
+                "% avi2talxfm",
+                "Transform_Type = Linear;",
+                "Linear_Transform = ",
+                "1 0 0 0",
+                "0 1 0 0",
+                "0 0 1 0",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    metadata_lines, matrix = preview_xfm_transform(str(xfm_path))
+
+    assert metadata_lines == ["MNI Transform File", "% avi2talxfm", "Transform_Type = Linear;"]
+    assert matrix.shape == (4, 4)
+    assert np.allclose(matrix[3], [0.0, 0.0, 0.0, 1.0])
+
+
+def test_format_xfm_preview_includes_affine_matrix():
+    """Test the XFM preview text includes the affine matrix after metadata."""
+    metadata_lines = ["MNI Transform File", "% avi2talxfm"]
+    matrix = np.array(
+        [
+            [1.0, 0.0, 0.0, 5.0],
+            [0.0, 1.0, 0.0, -6.0],
+            [0.0, 0.0, 1.0, 7.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ]
+    )
+
+    preview_text = format_xfm_preview(metadata_lines, matrix)
+
+    assert "MNI Transform File" in preview_text
+    assert "Affine matrix:" in preview_text
+    assert "  1.000000  0.000000  0.000000  5.000000" in preview_text
+    assert "  0.000000  1.000000  0.000000 -6.000000" in preview_text
 
 
 def test_transform_matrix_validation():

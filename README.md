@@ -151,17 +151,16 @@ python -m cli.main
 
 The current CLI is interactive and stateful. You start a session, then enter commands at the prompt.
 
-- Command syntax: `<group> <action> [args] [--flags]`
+- Command syntax: `<command> <object> [parameters] [--flags]`
 - Exit commands: `quit` and `exit`
-- Built-in frames loaded at startup: `head`, `mri`, `mni`, `scanner`
-- If `transforms.json` exists in the current working directory, its transforms are loaded into the session at startup
+- For point transforms, the source frame is inferred from the stored point. A source frame can still be provided as a validation check when needed.
 
 Example session:
 
 ```text
 > frame list
 > point add target 12 34 56 head
-> transform head mni 12 34 56 --show-chain
+> transform target mni --show-chain
 > session summary
 > exit
 ```
@@ -173,7 +172,7 @@ The following session shows a realistic TMS-style flow: load an MRI volume, regi
 ```text
 > volume load subject.nii.gz --name subject_mri --register-transform
 > point add motor_hotspot 10 20 30 head
-> transform head mri 10 20 30 --show-chain --show-matrix
+> transform motor_hotspot mri --show-chain --show-matrix
 > view volume subject_mri
 > session summary
 > exit

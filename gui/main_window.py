@@ -7,14 +7,68 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction
-from PySide6.QtWidgets import QFileDialog, QMainWindow, QMenu, QMessageBox, QSplitter, QTabWidget, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (
+    QDialog,
+    QDialogButtonBox,
+    QFileDialog,
+    QFormLayout,
+    QLineEdit,
+    QMainWindow,
+    QMenu,
+    QMessageBox,
+    QPlainTextEdit,
+    QSplitter,
+    QTabWidget,
+    QVBoxLayout,
+    QWidget,
+)
 
 from core.session import Session
+from core.import_service import preview_xfm_transform, get_file_extension
 from gui.console_widget import ConsoleWidget
 from gui.session_inspector import SessionInspectorWidget
 from gui.viewer.viewer_manager import ViewerManager
 from registry.command_registry import CommandRegistry
 from registry.transform_registry import TransformRegistry
+from core.import_service import format_xfm_preview, preview_xfm_transform, get_file_extension
+
+
+class XfmImportDialog(QDialog):
+    def __init__(self, path: str, metadata_lines: list[str], matrix, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Import XFM Transform")
+
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+
+        self._source_edit = QLineEdit()
+        self._target_edit = QLineEdit()
+        form.addRow("Source frame", self._source_edit)
+        form.addRow("Target frame", self._target_edit)
+        layout.addLayout(form)
+
+        preview_label = QPlainTextEdit()
+        preview_label.setReadOnly(True)
+        preview_label.setPlainText(
+            format_xfm_preview(metadata_lines, matrix) if metadata_lines or matrix is not None else "No metadata lines found."
+        )
+        preview_label.setMinimumHeight(180)
+        layout.addWidget(preview_label)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+        self._path = path
+
+    @property
+    def source_frame_name(self) -> str:
+        return self._source_edit.text().strip()
+
+    @property
+    def target_frame_name(self) -> str:
+        return self._target_edit.text().strip()
 
 
 class MainWindow(QMainWindow):
@@ -28,7 +82,7 @@ class MainWindow(QMainWindow):
 
         self._build_ui()
         self._build_menus()
-        self._refresh_inspector()
+        self._refresh_session()
         self._rebuild_object_menus()
 
     def _build_ui(self) -> None:
@@ -101,7 +155,7 @@ class MainWindow(QMainWindow):
         self._file_menu.addSeparator()
         self._file_menu.addAction(self._action("Exit", self.close))
 
-        self._session_menu.addAction(self._action("Refresh Inspector", self._refresh_inspector))
+        self._session_menu.addAction(self._action("Refresh Session", self._refresh_session))
         self._session_menu.addSeparator()
         self._session_menu.addAction(self._action("Show Overview", self.inspector.show_overview))
         self._session_menu.addAction(self._action("Show Points", self.inspector.show_points))
@@ -153,9 +207,13 @@ class MainWindow(QMainWindow):
     def _refresh_inspector(self) -> None:
         self.inspector.refresh(self._session)
 
-    def _on_session_changed(self) -> None:
+    def _refresh_session(self) -> None:
         self._refresh_inspector()
+        self.viewer_manager.refresh_viewers()
         self._rebuild_object_menus()
+
+    def _on_session_changed(self) -> None:
+        self._refresh_session()
 
     def _import_mri_dialog(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -183,8 +241,7 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             QMessageBox.warning(self, "Import MRI Image", f"Image imported but viewer could not open: {exc}")
 
-        self._refresh_inspector()
-        self._rebuild_object_menus()
+        self._refresh_session()
         self._set_status("MRI imported", info_msg, timeout=8000, level="info")
 
     def _import_transform_dialog(self) -> None:
@@ -193,7 +250,7 @@ class MainWindow(QMainWindow):
             self,
             "Import Transform",
             str(Path.cwd()),
-            "MNE Transform (*.fif);;All files (*.*)",
+            "Transform files (*.fif *.xfm);;MNE Transform (*.fif);;XFM Transform (*.xfm);;All files (*.*)",
         )
         if not path:
             return
@@ -207,7 +264,30 @@ class MainWindow(QMainWindow):
             path: Path to transform file
         """
         try:
-            transform, info_msg = self._session.import_transform(path)
+            ext = get_file_extension(path)
+            if ext == "xfm":
+                metadata_lines, matrix = preview_xfm_transform(path)
+                dialog = XfmImportDialog(path, metadata_lines, matrix, self)
+                if dialog.exec() != QDialog.DialogCode.Accepted:
+                    return
+
+                source_frame_name = dialog.source_frame_name
+                target_frame_name = dialog.target_frame_name
+                if not source_frame_name or not target_frame_name:
+                    QMessageBox.information(
+                        self,
+                        "Import XFM Transform",
+                        "Please provide both source and target frames.",
+                    )
+                    return
+
+                transform, info_msg = self._session.import_transform(
+                    path,
+                    source_frame_name=source_frame_name,
+                    target_frame_name=target_frame_name,
+                )
+            else:
+                transform, info_msg = self._session.import_transform(path)
         except Exception as exc:
             error_msg = str(exc)
             # Show error in status bar; details available on click
@@ -215,7 +295,7 @@ class MainWindow(QMainWindow):
             return
 
         # Update GUI
-        self._refresh_inspector()
+        self._refresh_session()
         # Show concise success message in status bar; details available on click
         self._set_status("Transform imported", info_msg, timeout=8000, level="info")
 
@@ -235,7 +315,7 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Load Transform Registry", str(exc))
             return
 
-        self._refresh_inspector()
+        self._refresh_session()
         self.statusBar().showMessage(f"Loaded transform registry from {path}", 8000)
 
     def _save_transform_registry_dialog(self) -> None:

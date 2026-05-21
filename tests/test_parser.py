@@ -15,9 +15,9 @@ def test_parser_simple_command():
 
 def test_parser_with_boolean_flags():
     """Parse command with boolean flags."""
-    parsed = parse_command("transform head mni 0 0 0 --json --show-matrix")
-    assert parsed.command == "transform.head"
-    assert parsed.args == ["mni", "0", "0", "0"]
+    parsed = parse_command("transform p1 mni --json --show-matrix")
+    assert parsed.command == "transform"
+    assert parsed.args == ["p1", "mni"]
     assert parsed.kwargs["json"] is True
     assert parsed.kwargs["show_matrix"] is True
 
@@ -33,17 +33,17 @@ def test_parser_with_value_flags():
 
 def test_parser_with_list_values():
     """Parse command with flag accepting multiple values."""
-    parsed = parse_command("transform head mni 0 0 0 --chain mat1 mat2 mat3")
-    assert parsed.command == "transform.head"
-    assert parsed.args == ["mni", "0", "0", "0"]
+    parsed = parse_command("transform p1 mni --chain mat1 mat2 mat3")
+    assert parsed.command == "transform"
+    assert parsed.args == ["p1", "mni"]
     assert parsed.kwargs["chain"] == ["mat1", "mat2", "mat3"]
 
 
 def test_parser_mixed_flags_and_values():
     """Parse command with mix of boolean and value flags."""
-    parsed = parse_command("transform head mni 10 20 30 --show-chain --frame scanner --json")
-    assert parsed.command == "transform.head"
-    assert parsed.args == ["mni", "10", "20", "30"]
+    parsed = parse_command("transform p1 mni --show-chain --frame scanner --json")
+    assert parsed.command == "transform"
+    assert parsed.args == ["p1", "mni"]
     assert parsed.kwargs["show_chain"] is True
     assert parsed.kwargs["frame"] == "scanner"
     assert parsed.kwargs["json"] is True

@@ -6,15 +6,16 @@ This script:
 2. Organizes files into a structured "dataset" folder
 3. Converts MRI volume from .mgz to .nii.gz
 4. Copies cortical surfaces, scalp, skull surfaces, and registration files
+5. Copies the sample MRI-to-template transform (Talairach)
 """
 
 import os
 import shutil
 from pathlib import Path
+from typing import cast
 
 import mne
 import nibabel as nib
-from nibabel.freesurfer import load as load_freesurfer
 from nibabel.nifti1 import Nifti1Image
 
 # Step 1: Download MNE sample dataset
@@ -52,7 +53,7 @@ nifti_output = dirs["mri"] / "T1.nii.gz"
 if mgz_path.exists():
     print(f"Loading: {mgz_path}")
     # Load MGZ file and convert to NIfTI
-    img = nib.load(str(mgz_path))
+    img = cast(Nifti1Image, nib.load(str(mgz_path)))
     # Save as NIfTI
     nib.save(img, str(nifti_output))
     print(f"✓ Saved as: {nifti_output}")
@@ -125,6 +126,16 @@ for trans_path in trans_files:
     shutil.copy2(str(trans_path), str(dest_path))
     print(f"✓ {trans_path.name}")
 
+# Also copy the MRI-to-template Talairach transform used with the sample T1 image
+talairach_dir = Path(sample_data_path) / "subjects" / "sample" / "mri" / "transforms"
+talairach_xfm = talairach_dir / "talairach.xfm"
+if talairach_xfm.exists():
+    dest_path = dirs["trans"] / talairach_xfm.name
+    shutil.copy2(str(talairach_xfm), str(dest_path))
+    print(f"✓ {talairach_xfm.name}")
+else:
+    print(f"✗ {talairach_xfm.name} not found")
+
 # Step 7: Summary
 print("\n" + "="*70)
 print("DOWNLOAD AND ORGANIZATION COMPLETE")
@@ -148,5 +159,6 @@ print("    - outer_skin.surf (Scalp surface)")
 print("    - outer_skull.surf, inner_skull.surf (Skull surfaces)")
 print("\n  Registration Files:")
 print("    - *-trans.fif (Head ↔ MRI transformations)")
+print("    - talairach.xfm (MRI ↔ Talairach template transform)")
 
 print("\nReady for TMS workflows!")

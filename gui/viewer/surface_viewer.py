@@ -17,11 +17,13 @@ class SurfaceViewer(ViewerTab):
         super().__init__(title="Surface Viewer")
         self._surface: Surface | None = None
         self._surface_name: Optional[str] = None
+        self._session: Session | None = None
 
     def load_surface(self, surface_name: str, surface: Surface, session: Session | None = None) -> None:
         self.clear_scene()
         self._surface = surface
         self._surface_name = surface_name
+        self._session = session
 
         mesh = surface_to_polydata(surface)
         self.plotter.add_mesh(
@@ -48,3 +50,16 @@ class SurfaceViewer(ViewerTab):
         ])
         self.fit_camera()
         self.set_status(f"Loaded surface '{surface_name}'")
+
+    def refresh_from_session(self, session: Session | None = None) -> None:
+        active_session = session or self._session
+        if active_session is None or self._surface_name is None:
+            return
+
+        try:
+            surface = active_session.get_surface(self._surface_name)
+        except KeyError:
+            self.clear_scene()
+            return
+
+        self.load_surface(self._surface_name, surface, session=active_session)

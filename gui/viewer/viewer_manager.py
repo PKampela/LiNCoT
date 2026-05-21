@@ -2,15 +2,32 @@
 
 from __future__ import annotations
 
-from typing import Dict, Optional, Type
+from typing import Optional
 
-from PySide6.QtWidgets import QTabWidget, QWidget
+from PySide6.QtWidgets import QLabel, QTabWidget, QVBoxLayout, QWidget
 
 from core.session import Session
 
-from .base_viewer import BaseViewer
-from .surface_viewer import SurfaceViewer
-from .volume_viewer import VolumeViewer
+
+class _UnavailableViewer(QWidget):
+    def __init__(self, title: str, message: str) -> None:
+        super().__init__()
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(10)
+
+        heading = QLabel(title)
+        heading.setStyleSheet("font-size: 16px; font-weight: 600;")
+        body = QLabel(message)
+        body.setWordWrap(True)
+
+        layout.addWidget(heading)
+        layout.addWidget(body)
+        layout.addStretch(1)
+
+    def reset_camera(self) -> None:
+        return
 
 
 class ViewerManager:
@@ -19,23 +36,42 @@ class ViewerManager:
     def __init__(self, tabs: QTabWidget, session: Session) -> None:
         self._tabs = tabs
         self._session = session
-        self._viewer_factories: Dict[str, Type[BaseViewer]] = {
-            "base": BaseViewer,
-            "surface": SurfaceViewer,
-            "volume": VolumeViewer,
-        }
+        self._viewer_backend_error: str | None = None
 
     def create_viewer_tab(self, viewer_type: str, title: str | None = None) -> QWidget:
         key = viewer_type.lower()
-        factory = self._viewer_factories.get(key)
-        if factory is None:
+        if key not in {"base", "surface", "volume"}:
             raise ValueError(f"Unknown viewer type '{viewer_type}'")
 
-        viewer = factory() if factory is not BaseViewer else BaseViewer(title=title or "Viewer")
+        viewer = self._build_viewer(key, title or viewer_type.title())
         tab_title = title or viewer_type.title()
         self._tabs.addTab(viewer, tab_title)
         self._tabs.setCurrentWidget(viewer)
         return viewer
+
+    def _build_viewer(self, viewer_type: str, title: str) -> QWidget:
+        try:
+            if viewer_type == "base":
+                from .base_viewer import BaseViewer
+
+                return BaseViewer(title=title)
+            if viewer_type == "surface":
+                from .surface_viewer import SurfaceViewer
+
+                return SurfaceViewer()
+            if viewer_type == "volume":
+                from .volume_viewer import VolumeViewer
+
+                return VolumeViewer()
+        except (ImportError, ModuleNotFoundError, OSError) as exc:
+            self._viewer_backend_error = str(exc)
+            return _UnavailableViewer(
+                title,
+                "The interactive 3D viewer backend could not be loaded on this Windows installation. "
+                f"Details: {exc}",
+            )
+
+        raise ValueError(f"Unknown viewer type '{viewer_type}'")
 
     @property
     def active_viewer(self) -> Optional[QWidget]:
@@ -44,15 +80,15 @@ class ViewerManager:
     def open_surface(self, surface_name: str) -> QWidget:
         surface = self._session.get_surface(surface_name)
         viewer = self.create_viewer_tab("surface", f"Surface: {surface_name}")
-        assert isinstance(viewer, SurfaceViewer)
-        viewer.load_surface(surface_name, surface, session=self._session)
+        if hasattr(viewer, "load_surface"):
+            viewer.load_surface(surface_name, surface, session=self._session)
         return viewer
 
     def open_volume(self, image_name: str) -> QWidget:
         image = self._session.get_image(image_name)
         viewer = self.create_viewer_tab("volume", f"Volume: {image_name}")
-        assert isinstance(viewer, VolumeViewer)
-        viewer.load_image(image_name, image, session=self._session)
+        if hasattr(viewer, "load_image"):
+            viewer.load_image(image_name, image, session=self._session)
         return viewer
 
     def open_from_descriptor(self, descriptor: dict | None) -> Optional[QWidget]:
@@ -66,6 +102,16 @@ class ViewerManager:
         if viewer_type == "volume" and object_name:
             return self.open_volume(object_name)
         return None
+
+    def refresh_viewers(self) -> None:
+        for index in range(self._tabs.count()):
+            viewer = self._tabs.widget(index)
+            if viewer is None:
+                continue
+            if hasattr(viewer, "refresh_from_session"):
+                viewer.refresh_from_session(self._session)
+            elif hasattr(viewer, "update_scene"):
+                viewer.update_scene()
 
     def close_tab(self, index: int) -> None:
         widget = self._tabs.widget(index)

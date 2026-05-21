@@ -5,6 +5,7 @@ import pytest
 from cli.main import _bootstrap_session, build_command_registry
 from cli.parser import CommandParseError, parse_command
 from core.frames import CoordinateFrame
+from core.transform import Transform
 from registry.command_registry import CommandExecutionError
 
 
@@ -16,6 +17,17 @@ def session():
     session.add_frame(CoordinateFrame("mri", ("R", "A", "S"), "mm"))
     session.add_frame(CoordinateFrame("mni", ("R", "A", "S"), "mm"))
     session.add_frame(CoordinateFrame("scanner", ("R", "A", "S"), "mm"))
+    head = session.get_frame("head")
+    mri = session.get_frame("mri")
+    mni = session.get_frame("mni")
+    session.add_transform(
+        "head_to_mri",
+        Transform(head, mri, [[1, 0, 0, 1], [0, 1, 0, 2], [0, 0, 1, 3], [0, 0, 0, 1]]),
+    )
+    session.add_transform(
+        "mri_to_mni",
+        Transform(mri, mni, [[1, 0, 0, -1], [0, 1, 0, -2], [0, 0, 1, -3], [0, 0, 0, 1]]),
+    )
     return session
 
 
@@ -77,15 +89,24 @@ def test_wrong_argument_count_point_add(session, registry):
 
 def test_wrong_argument_count_transform(session, registry):
     """Registry: transform with wrong number of args raises CommandExecutionError."""
-    # Needs exactly 5 args: source, target, x, y, z
+    # transform now accepts 2/3 args for points or 5 args for legacy coordinates
     with pytest.raises(CommandExecutionError):
-        registry.execute(session, "transform", ["head", "mni"], {})
+        registry.execute(session, "transform", ["head"], {})
 
 
 def test_invalid_parser_syntax():
     """Parser: missing required group/action raises CommandParseError."""
     with pytest.raises(CommandParseError):
         parse_command("onlyaction")
+
+
+def test_transform_object_first_parser():
+    """Parser: object-first transform syntax maps to transform."""
+    parsed = parse_command("transform p1 T1_voxel")
+
+    assert parsed.command == "transform"
+    assert parsed.args == ["p1", "T1_voxel"]
+    assert parsed.kwargs == {}
 
 
 def test_invalid_parser_empty():

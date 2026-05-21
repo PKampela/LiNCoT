@@ -55,6 +55,7 @@ class VolumeViewer(ViewerTab):
         self._reset_button.setToolTip("Center slices")
         self._image: Optional[Image] = None
         self._image_name: Optional[str] = None
+        self._session: Session | None = None
         self._slice_sliders: list[QSlider] = []
         self._slice_labels: list[QLabel] = []
         self._slice_titles: list[QLabel] = []
@@ -119,6 +120,7 @@ class VolumeViewer(ViewerTab):
         self.clear_scene()
         self._image = image
         self._image_name = image_name
+        self._session = session
 
         center = tuple((float(size) - 1.0) / 2.0 for size in image.shape)
         for axis, slider in enumerate(self._slice_sliders):
@@ -142,7 +144,21 @@ class VolumeViewer(ViewerTab):
         ])
 
         self._set_cursor_from_voxel(center)
+        self._focus_point_in_image_frame()
         self.set_status(f"Loaded MRI '{image_name}'")
+
+    def refresh_from_session(self, session: Session | None = None) -> None:
+        active_session = session or self._session
+        if active_session is None or self._image_name is None:
+            return
+
+        try:
+            image = active_session.get_image(self._image_name)
+        except KeyError:
+            self.clear_scene()
+            return
+
+        self.load_image(self._image_name, image, session=active_session)
 
     def _update_slices(self) -> None:
         if self._image is None or self._updating_controls:
@@ -195,6 +211,21 @@ class VolumeViewer(ViewerTab):
         self._update_slice_panels(indices)
         self._update_cursor_details(indices, world)
 
+    def _focus_point_in_image_frame(self) -> None:
+        if self._image is None or self._session is None:
+            return
+
+        matching_points = [
+            (name, self._session.get_point(name))
+            for name in self._session.list_points()
+            if self._session.get_point(name).frame.name == self._image.frame.name
+        ]
+        if not matching_points:
+            return
+
+        _, point = matching_points[0]
+        self._set_cursor_from_world(tuple(float(value) for value in point.coords.tolist()))
+
     def _update_slice_panels(self, indices: tuple[int, int, int]) -> None:
         if self._image is None:
             return
@@ -204,13 +235,71 @@ class VolumeViewer(ViewerTab):
             (1, indices[1], (indices[0], indices[2]), f"Coronal (y = {indices[1]})"),
             (0, indices[0], (indices[1], indices[2]), f"Sagittal (x = {indices[0]})"),
         )
+        point_items = self._matching_points_in_image_frame()
         for pane_index, (axis, slice_index, crosshair, title) in enumerate(slice_specs):
             self._slice_titles[pane_index].setText(title)
             slice_data = orthogonal_slice_data(self._image, axis, slice_index)
-            self._slice_views[pane_index].set_source_pixmap(self._slice_to_pixmap(slice_data, crosshair))
+            pixmap = self._slice_to_pixmap(slice_data, crosshair)
+            if point_items:
+                self._draw_points_on_slice(pixmap, axis, slice_index, point_items)
+            self._slice_views[pane_index].set_source_pixmap(pixmap)
+
+    def _matching_points_in_image_frame(self) -> list[tuple[str, object]]:
+        if self._image is None or self._session is None:
+            return []
+
+        points = []
+        for name in self._session.list_points():
+            point = self._session.get_point(name)
+            if point.frame.name == self._image.frame.name:
+                points.append((name, point))
+        return points
+
+    def _draw_points_on_slice(
+        self,
+        pixmap: QPixmap,
+        axis: int,
+        slice_index: int,
+        point_items: list[tuple[str, object]],
+    ) -> None:
+        if self._image is None:
+            return
+
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+
+        for name, point in point_items:
+            try:
+                voxel_coords = world_to_voxel(self._image, tuple(float(value) for value in point.coords.tolist()))
+            except Exception:
+                continue
+
+            if abs(float(voxel_coords[axis]) - float(slice_index)) > 0.5:
+                continue
+
+            if axis == 2:
+                x_pos, y_pos = float(voxel_coords[0]), float(voxel_coords[1])
+            elif axis == 1:
+                x_pos, y_pos = float(voxel_coords[0]), float(voxel_coords[2])
+            else:
+                x_pos, y_pos = float(voxel_coords[1]), float(voxel_coords[2])
+
+            x_int = int(round(x_pos))
+            y_int = int(round(y_pos))
+            if x_int < 0 or y_int < 0:
+                continue
+
+            pen = QPen(QColor("#f97316"))
+            pen.setWidth(2)
+            painter.setPen(pen)
+            painter.setBrush(QColor("#f97316"))
+            painter.drawEllipse(x_int - 4, y_int - 4, 8, 8)
+            painter.drawText(x_int + 6, y_int - 6, name)
+
+        painter.end()
 
     def _slice_to_pixmap(self, slice_data: np.ndarray, crosshair: tuple[int, int]) -> QPixmap:
-        data = np.asarray(slice_data, dtype=float)
+        data = np.asarray(slice_data, dtype=float).T
         finite = np.isfinite(data)
         if not finite.any():
             scaled = np.zeros_like(data, dtype=np.uint8)

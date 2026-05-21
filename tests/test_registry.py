@@ -1,7 +1,6 @@
 """Tests for CommandRegistry command execution."""
 
 import json
-from pathlib import Path
 
 import numpy as np
 import pytest
@@ -10,6 +9,7 @@ from cli.main import _bootstrap_session, build_command_registry
 from core.frames import CoordinateFrame
 from core.point import Point
 from core.session import Session
+from core.transform import Transform
 from registry.command_registry import CommandExecutionError
 
 
@@ -21,6 +21,17 @@ def session():
     session.add_frame(CoordinateFrame("mri", ("R", "A", "S"), "mm"))
     session.add_frame(CoordinateFrame("mni", ("R", "A", "S"), "mm"))
     session.add_frame(CoordinateFrame("scanner", ("R", "A", "S"), "mm"))
+    head = session.get_frame("head")
+    mri = session.get_frame("mri")
+    mni = session.get_frame("mni")
+    session.add_transform(
+        "head_to_mri",
+        Transform(head, mri, np.array([[1, 0, 0, 1], [0, 1, 0, 2], [0, 0, 1, 3], [0, 0, 0, 1]], dtype=float)),
+    )
+    session.add_transform(
+        "mri_to_mni",
+        Transform(mri, mni, np.array([[1, 0, 0, -1], [0, 1, 0, -2], [0, 0, 1, -3], [0, 0, 0, 1]], dtype=float)),
+    )
     return session
 
 
@@ -28,14 +39,6 @@ def session():
 def registry():
     """Fresh registry for each test."""
     return build_command_registry()
-
-
-@pytest.fixture
-def working_repo_dir(monkeypatch):
-    """Change working directory to repo root so transforms.json is accessible."""
-    repo_root = Path(__file__).resolve().parents[1]
-    monkeypatch.chdir(repo_root)
-    return repo_root
 
 
 def test_point_add_command(session, registry):
@@ -50,6 +53,38 @@ def test_point_add_command(session, registry):
     assert result.message == "Added point 'p1' in frame 'head'"
     assert session.get_point("p1") is not None
     assert np.allclose(session.get_point("p1").coords, [10, 20, 30])
+
+
+def test_point_transform_command(session, registry):
+    """Registry: transform updates an existing point in place."""
+    session.add_point("p1", Point(np.array([0, 0, 0]), session.get_frame("head")))
+
+    result = registry.execute(
+        session,
+        "transform",
+        ["p1", "mni"],
+        {},
+    )
+
+    assert "Transformed point 'p1' from 'head' to 'mni'" in result.message
+    assert session.get_point("p1").frame.name == "mni"
+    assert result.data["point"]["name"] == "p1"
+    assert result.data["point"]["frame"] == "mni"
+
+
+def test_point_transform_command_uses_inverse_chain(session, registry):
+    """Registry: transform works when the reverse path is resolved by inversion."""
+    session.add_point("p1", Point(np.array([0, 0, 0]), session.get_frame("mni")))
+
+    result = registry.execute(
+        session,
+        "transform",
+        ["p1", "head"],
+        {},
+    )
+
+    assert "Transformed point 'p1' from 'mni' to 'head'" in result.message
+    assert session.get_point("p1").frame.name == "head"
 
 
 def test_point_list_command_empty(session, registry):
@@ -84,16 +119,15 @@ def test_frame_list_command(session, registry):
     assert set(result.data["frames"]) == {"head", "mri", "mni", "scanner"}
 
 
-def test_transform_list_command(session, registry, working_repo_dir):
+def test_transform_list_command(session, registry):
     """Registry: transform.list shows registered transforms."""
     result = registry.execute(session, "transform.list", [], {})
     
-    # Session transforms are explicit; nothing is preloaded by default.
-    assert result.data["transforms"] == []
-    assert result.message == "Transforms: none"
+    assert result.data["transforms"] == ["head_to_mri", "mri_to_mni"]
+    assert result.message == "Transforms: head_to_mri, mri_to_mni"
 
 
-def test_transform_command_basic(session, registry, working_repo_dir):
+def test_transform_command_basic(session, registry):
     """Registry: transform resolves and applies transform."""
     result = registry.execute(
         session,
@@ -109,7 +143,22 @@ def test_transform_command_basic(session, registry, working_repo_dir):
     assert result.data["output"]["frame"] == "mni"
 
 
-def test_transform_command_with_json_flag(session, registry, working_repo_dir):
+def test_transform_command_uses_inverse_chain(session, registry):
+    """Registry: transform can resolve a path using inverse transforms."""
+    result = registry.execute(
+        session,
+        "transform",
+        ["mni", "head", "0", "0", "0"],
+        {},
+    )
+
+    assert result.data["input"]["frame"] == "mni"
+    assert result.data["output"]["frame"] == "head"
+    assert [step["name"] for step in result.data["chain"]] == ["mri_to_mni", "head_to_mri"]
+    assert all(step["inverted"] for step in result.data["chain"])
+
+
+def test_transform_command_with_json_flag(session, registry):
     """Registry: transform returns JSON format when requested."""
     result = registry.execute(
         session,
@@ -123,7 +172,7 @@ def test_transform_command_with_json_flag(session, registry, working_repo_dir):
     assert result.data["input"]["coords"] == [10.0, 20.0, 30.0]
 
 
-def test_transform_command_with_show_chain(session, registry, working_repo_dir):
+def test_transform_command_with_show_chain(session, registry):
     """Registry: transform with --show-chain flag."""
     result = registry.execute(
         session,
@@ -137,7 +186,7 @@ def test_transform_command_with_show_chain(session, registry, working_repo_dir):
     assert "mri_to_mni" in result.message
 
 
-def test_transform_command_with_show_matrix(session, registry, working_repo_dir):
+def test_transform_command_with_show_matrix(session, registry):
     """Registry: transform with --show-matrix flag."""
     result = registry.execute(
         session,
@@ -150,7 +199,7 @@ def test_transform_command_with_show_matrix(session, registry, working_repo_dir)
     assert "composed_matrix" in result.data
 
 
-def test_transform_with_numeric_kwargs(session, registry, working_repo_dir):
+def test_transform_with_numeric_kwargs(session, registry):
     """Registry: numeric arguments parsed as strings work correctly."""
     result = registry.execute(
         session,
@@ -186,7 +235,7 @@ def test_help_command(session, registry):
     assert "session.summary" in result.message
 
 
-def test_transform_with_numeric_kwargs(session, registry, working_repo_dir):
+def test_transform_with_numeric_kwargs(session, registry):
     """Registry: numeric arguments parsed as strings work correctly."""
     result = registry.execute(
         session,

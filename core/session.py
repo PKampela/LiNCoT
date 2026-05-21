@@ -78,7 +78,12 @@ class Session:
     def list_surfaces(self) -> List[str]:
         return self.surfaces.list_surfaces()
 
-    def import_transform(self, path: str) -> tuple[Transform, str]:
+    def import_transform(
+        self,
+        path: str,
+        source_frame_name: str | None = None,
+        target_frame_name: str | None = None,
+    ) -> tuple[Transform, str]:
         """Import a transform from file into the session.
 
         Routes to appropriate backend based on file extension.
@@ -95,7 +100,12 @@ class Session:
         """
         from .import_service import import_transform as service_import
 
-        return service_import(self, path)
+        return service_import(
+            self,
+            path,
+            source_frame_name=source_frame_name,
+            target_frame_name=target_frame_name,
+        )
 
     def import_image(self, path: str) -> tuple[Image, str]:
         """Import an MRI image from file into the session.

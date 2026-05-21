@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 from collections import deque
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
@@ -221,42 +220,37 @@ class TransformResolutionError(ValueError):
         self.explain_lines = explain_lines or []
 
 
-def _default_transform_file() -> str:
-    return str(Path.cwd() / "transforms.json")
-
-
-def _load_transform_registry(
-    transform_file: Optional[str],
-    frames: Mapping[str, CoordinateFrame],
-) -> TransformRegistry:
-    path = transform_file or _default_transform_file()
-    if not Path(path).exists():
-        raise FileNotFoundError(f"Transform registry not found: {path}")
-    return TransformRegistry.load(path, frames)
+@dataclass(frozen=True)
+class _ResolvedStep:
+    source: str
+    target: str
+    name: str
+    inverted: bool = False
 
 
 def _build_transform_graph(
     registry: TransformRegistry,
-) -> Dict[str, List[Tuple[str, str]]]:
-    graph: Dict[str, List[Tuple[str, str]]] = {}
+) -> Dict[str, List[Tuple[str, str, bool]]]:
+    graph: Dict[str, List[Tuple[str, str, bool]]] = {}
     for name in registry.list_transforms():
         transform = registry.get_transform(name)
-        graph.setdefault(transform.source.name, []).append((transform.target.name, name))
+        graph.setdefault(transform.source.name, []).append((transform.target.name, name, False))
+        graph.setdefault(transform.target.name, []).append((transform.source.name, name, True))
     for source in graph:
-        graph[source].sort(key=lambda item: (item[0], item[1]))
+        graph[source].sort(key=lambda item: (item[0], item[1], item[2]))
     return graph
 
 
 def _find_shortest_paths(
-    graph: Mapping[str, List[Tuple[str, str]]],
+    graph: Mapping[str, List[Tuple[str, str, bool]]],
     source: str,
     target: str,
     limit: int = 50,
-) -> List[List[str]]:
-    queue: deque[Tuple[str, List[str]]] = deque([(source, [])])
+) -> List[List[Tuple[str, bool]]]:
+    queue: deque[Tuple[str, List[Tuple[str, bool]]]] = deque([(source, [])])
     visited_depth: Dict[str, int] = {source: 0}
     shortest_len: Optional[int] = None
-    results: List[List[str]] = []
+    results: List[List[Tuple[str, bool]]] = []
 
     while queue:
         node, path = queue.popleft()
@@ -269,46 +263,51 @@ def _find_shortest_paths(
             if len(results) >= limit:
                 break
             continue
-        for next_node, transform_name in graph.get(node, []):
+        for next_node, transform_name, inverted in graph.get(node, []):
             next_depth = depth + 1
             if shortest_len is not None and next_depth > shortest_len:
                 continue
             prev_depth = visited_depth.get(next_node)
             if prev_depth is None or prev_depth >= next_depth:
                 visited_depth[next_node] = next_depth
-                queue.append((next_node, path + [transform_name]))
+                queue.append((next_node, path + [(transform_name, inverted)]))
     return results
 
 
 def _chain_steps(
-    transform_names: Iterable[str],
+    transform_names: Iterable[Tuple[str, bool]],
     registry: TransformRegistry,
-) -> List[Dict[str, str]]:
-    steps: List[Dict[str, str]] = []
-    for name in transform_names:
+) -> Tuple[List[Transform], List[Dict[str, object]]]:
+    transforms: List[Transform] = []
+    steps: List[Dict[str, object]] = []
+    for name, inverted in transform_names:
         transform = registry.get_transform(name)
+        if inverted:
+            transform = transform.invert()
+        transforms.append(transform)
         steps.append(
             {
                 "source": transform.source.name,
                 "target": transform.target.name,
                 "name": name,
+                "inverted": inverted,
             }
         )
-    return steps
+    return transforms, steps
 
 
-def _path_string(steps: List[Dict[str, str]]) -> str:
+def _path_string(steps: List[Dict[str, object]]) -> str:
     if not steps:
         return ""
-    nodes = [steps[0]["source"]] + [step["target"] for step in steps]
+    nodes = [str(steps[0]["source"])] + [str(step["target"]) for step in steps]
     return " -> ".join(nodes)
 
 
-def _units_summary(steps: List[Dict[str, str]], registry: TransformRegistry) -> str:
+def _units_summary(steps: List[Dict[str, object]], registry: TransformRegistry) -> str:
     units = []
     for step in steps:
-        source_units = registry.get_transform(step["name"]).source.units
-        target_units = registry.get_transform(step["name"]).target.units
+        source_units = registry.get_transform(str(step["name"])).source.units
+        target_units = registry.get_transform(str(step["name"])).target.units
         if not units:
             units.append(source_units)
         if units[-1] != target_units:
@@ -325,7 +324,7 @@ def _resolve_transform_chain(
     source: str,
     target: str,
     transform_names: Optional[List[str]],
-) -> Tuple[TransformChain, List[Dict[str, str]], List[str]]:
+) -> Tuple[TransformChain, List[Dict[str, object]], List[str]]:
     explain_lines: List[str] = [
         f"Resolving transform from '{source}' to '{target}':",
         "",
@@ -334,8 +333,8 @@ def _resolve_transform_chain(
 
     if transform_names:
         try:
-            steps = _chain_steps(transform_names, registry)
-            chain = TransformChain([registry.get_transform(name) for name in transform_names])
+            chain_transforms, steps = _chain_steps([(name, False) for name in transform_names], registry)
+            chain = TransformChain(chain_transforms)
         except (KeyError, ValueError) as exc:
             raise TransformResolutionError(str(exc)) from exc
         if chain.source.name != source or chain.target.name != target:
@@ -372,8 +371,8 @@ def _resolve_transform_chain(
         )
 
     selected = paths[0]
-    steps = _chain_steps(selected, registry)
-    chain = TransformChain([registry.get_transform(name) for name in selected])
+    chain_transforms, steps = _chain_steps(selected, registry)
+    chain = TransformChain(chain_transforms)
     explain_lines.extend(
         [
             f"- Constructed {len(paths)} possible chains",
@@ -386,51 +385,176 @@ def _resolve_transform_chain(
 
 
 def _cmd_transform(session: Session, args: Sequence[str], kwargs: Dict[str, Any]) -> CommandResult:
-    """Transform a point between coordinate frames.
-    
-    Args:
-        args: [source_frame, target_frame, x, y, z]
-        kwargs: {
-            'transform_file': path (optional),
-            'chain': name or [names] (optional transform chain),
-            'show_chain': bool,
-            'show_matrix': bool,
-            'explain': bool,
-            'json': bool
-        }
+    """Transform either an existing point or a raw coordinate triple.
+
+    Accepted forms:
+        transform <point> <target>
+        transform <point> <source> <target>
+        transform <source> <target> <x> <y> <z>
     """
-    if len(args) != 5:
-        raise CommandExecutionError(f"transform expects 5 arguments, got {len(args)}")
-    
-    source_frame, target_frame, x_str, y_str, z_str = args
-    
-    # Load transforms from the session's registered frames
-    frame_registry = session.frames
-    frames = {name: frame_registry.get_frame(name) for name in frame_registry.list_frames()}
-    
-    if source_frame not in frames or target_frame not in frames:
-        raise CommandExecutionError(f"Unknown frame: source='{source_frame}' or target='{target_frame}'")
-    
-    try:
-        transform_file = kwargs.get("transform_file")
-        transform_registry = _load_transform_registry(transform_file, frames)
-    except (FileNotFoundError, KeyError, ValueError) as exc:
-        raise CommandExecutionError(f"Failed to load transforms: {exc}") from exc
-    
-    # Parse coords
-    try:
-        coords = [float(x_str), float(y_str), float(z_str)]
-    except ValueError as exc:
-        raise CommandExecutionError(f"Invalid coordinates: {exc}") from exc
-    
-    point = Point(np.asarray(coords, dtype=float), frames[source_frame])
-    
-    # Resolve chain
+    transform_registry = session.transforms
+    if not transform_registry.list_transforms():
+        raise CommandExecutionError(
+            "No transforms are registered in this session. Import a transform or MRI volume first."
+        )
+
     chain_spec = kwargs.get("chain")
     transform_names = None
     if chain_spec:
         transform_names = chain_spec if isinstance(chain_spec, list) else [chain_spec]
-    
+
+    if len(args) in {2, 3}:
+        point_name = args[0]
+        if len(args) == 2:
+            target_frame = args[1]
+            try:
+                point = session.get_point(point_name)
+            except KeyError as exc:
+                raise CommandExecutionError(f"Unknown point: {point_name}") from exc
+            source_frame = point.frame.name
+        else:
+            source_frame, target_frame = args[1], args[2]
+            try:
+                point = session.get_point(point_name)
+            except KeyError as exc:
+                raise CommandExecutionError(f"Unknown point: {point_name}") from exc
+            if point.frame.name != source_frame:
+                raise CommandExecutionError(
+                    f"Point '{point_name}' is in frame '{point.frame.name}', not '{source_frame}'"
+                )
+
+        if source_frame == target_frame:
+            updated_point = point
+            steps: List[Dict[str, object]] = []
+            explain_lines = [
+                f"Resolving transform from '{source_frame}' to '{target_frame}':",
+                "",
+                "- Source and target are the same frame; no transform needed",
+            ]
+            payload: Dict[str, object] = {
+                "point": {
+                    "name": point_name,
+                    "frame": updated_point.frame.name,
+                    "coords": updated_point.coords.tolist(),
+                },
+                "transform": {"input": None, "output": None, "chain": []},
+            }
+            text_lines = [
+                f"Point '{point_name}' is already in frame '{target_frame}'",
+                f"Output point ({updated_point.frame.name}): {updated_point.coords.tolist()} {updated_point.frame.units}",
+            ]
+            if kwargs.get("show_chain"):
+                text_lines.append("Transform chain:")
+                text_lines.append("  <none>")
+            if kwargs.get("explain"):
+                payload["transform"]["explain"] = explain_lines
+                text_lines = explain_lines + [""] + text_lines
+            if kwargs.get("show_matrix"):
+                payload["transform"]["composed_matrix"] = np.eye(4).tolist()
+            session.add_point(point_name, updated_point)
+            return CommandResult(
+                message="\n".join(text_lines),
+                data=payload,
+                output_format="json" if kwargs.get("json") else "text",
+            )
+
+        if not transform_registry.list_transforms():
+            raise CommandExecutionError(
+                "No transforms are registered in this session. Import a transform or MRI volume first."
+            )
+
+        try:
+            chain, steps, explain_lines = _resolve_transform_chain(
+                transform_registry,
+                source_frame,
+                target_frame,
+                transform_names,
+            )
+        except TransformResolutionError as exc:
+            lines = []
+            if kwargs.get("explain") and exc.explain_lines:
+                lines.extend(exc.explain_lines)
+            lines.append(str(exc))
+            return CommandResult(
+                message="\n".join(lines),
+                data={"error": str(exc)},
+                output_format="json" if kwargs.get("json") else "text"
+            )
+
+        result = chain.apply(point)
+        if result.frame.name != target_frame:
+            raise CommandExecutionError(
+                f"Transform chain result frame '{result.frame.name}' does not match "
+                f"requested target frame '{target_frame}'."
+            )
+
+        session.add_point(point_name, result)
+
+        payload = {
+            "point": {
+                "name": point_name,
+                "frame": result.frame.name,
+                "coords": result.coords.tolist(),
+            },
+            "input": {
+                "frame": point.frame.name,
+                "coords": point.coords.tolist(),
+                "units": point.frame.units,
+            },
+            "output": {
+                "frame": result.frame.name,
+                "coords": result.coords.tolist(),
+                "units": result.frame.units,
+            },
+            "chain": steps,
+        }
+
+        text_lines = [
+            f"Transformed point '{point_name}' from '{source_frame}' to '{target_frame}'",
+            f"Input point ({point.frame.name}): {point.coords.tolist()} {point.frame.units}",
+            f"Output point ({result.frame.name}): {result.coords.tolist()} {result.frame.units}",
+        ]
+
+        if kwargs.get("show_chain"):
+            text_lines.append("Transform chain:")
+            for step in steps:
+                name = f"{step['name']} (inverse)" if step.get("inverted") else str(step["name"])
+                text_lines.append(f"  {step['source']} -> {step['target']}   (affine: {name})")
+
+        if kwargs.get("show_matrix"):
+            composed = chain.compose()
+            payload["composed_matrix"] = composed.matrix.tolist()
+            text_lines.append("Composed affine:")
+            text_lines.append(str(composed.matrix))
+
+        if kwargs.get("explain"):
+            payload["explain"] = explain_lines
+            text_lines = explain_lines + [""] + text_lines
+
+        return CommandResult(
+            message="\n".join(text_lines),
+            data=payload,
+            output_format="json" if kwargs.get("json") else "text",
+        )
+
+    if len(args) != 5:
+        raise CommandExecutionError(f"transform expects 2, 3, or 5 arguments, got {len(args)}")
+
+    source_frame, target_frame, x_str, y_str, z_str = args
+
+    frame_registry = session.frames
+    frames = {name: frame_registry.get_frame(name) for name in frame_registry.list_frames()}
+
+    if source_frame not in frames or target_frame not in frames:
+        raise CommandExecutionError(f"Unknown frame: source='{source_frame}' or target='{target_frame}'")
+
+    try:
+        coords = [float(x_str), float(y_str), float(z_str)]
+    except ValueError as exc:
+        raise CommandExecutionError(f"Invalid coordinates: {exc}") from exc
+
+    point = Point(np.asarray(coords, dtype=float), frames[source_frame])
+
     try:
         chain, steps, explain_lines = _resolve_transform_chain(
             transform_registry,
@@ -448,17 +572,15 @@ def _cmd_transform(session: Session, args: Sequence[str], kwargs: Dict[str, Any]
             data={"error": str(exc)},
             output_format="json" if kwargs.get("json") else "text"
         )
-    
-    # Apply transform
+
     result = chain.apply(point)
-    
+
     if result.frame.name != target_frame:
         raise CommandExecutionError(
             f"Transform chain result frame '{result.frame.name}' does not match "
             f"requested target frame '{target_frame}'."
         )
-    
-    # Build output
+
     payload: Dict[str, object] = {
         "input": {
             "frame": point.frame.name,
@@ -472,7 +594,7 @@ def _cmd_transform(session: Session, args: Sequence[str], kwargs: Dict[str, Any]
         },
         "chain": steps,
     }
-    
+
     text_lines: List[str] = []
     text_lines.append(
         f"Input point ({point.frame.name}): {point.coords.tolist()} {point.frame.units}"
@@ -480,26 +602,27 @@ def _cmd_transform(session: Session, args: Sequence[str], kwargs: Dict[str, Any]
     text_lines.append(
         f"Output point ({result.frame.name}): {result.coords.tolist()} {result.frame.units}"
     )
-    
+
     if kwargs.get("show_chain"):
         text_lines.append("Transform chain:")
         for step in steps:
+            name = f"{step['name']} (inverse)" if step.get("inverted") else str(step["name"])
             text_lines.append(
-                f"  {step['source']} -> {step['target']}   (affine: {step['name']})"
+                f"  {step['source']} -> {step['target']}   (affine: {name})"
             )
-    
+
     if kwargs.get("show_matrix"):
         composed = chain.compose()
         payload["composed_matrix"] = composed.matrix.tolist()
         text_lines.append("Composed affine:")
         text_lines.append(str(composed.matrix))
-    
+
     if kwargs.get("explain"):
         payload["explain"] = explain_lines
         text_lines = explain_lines + [""] + text_lines
-    
+
     message = "\n".join(text_lines)
-    
+
     return CommandResult(
         message=message,
         data=payload,
@@ -552,7 +675,7 @@ def register_default_commands(registry: CommandRegistry) -> None:
     registry.register("point.add", _cmd_point_add, "point add <name> <x> <y> <z> <frame>")
     registry.register("point.list", _cmd_point_list, "point list")
     registry.register("frame.list", _cmd_frame_list, "frame list")
-    registry.register("transform", _cmd_transform, "transform <source> <target> <x> <y> <z> [--chain name1 name2] [--show-chain] [--show-matrix] [--explain] [--json]")
+    registry.register("transform", _cmd_transform, "transform <point> <target> [--chain name1 name2] [--show-chain] [--show-matrix] [--explain] [--json]")
     registry.register("transform.list", _cmd_transform_list, "transform list")
     registry.register("volume.load", _cmd_volume_load, "volume load <path> [--json]")
     registry.register("volume.import", _cmd_volume_import, "volume import <path> [--json]")

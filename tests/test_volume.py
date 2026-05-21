@@ -53,7 +53,7 @@ def test_mri_import_registers_image_frames_and_transforms(session, nifti_file):
     assert "test_brain_voxel" in session.frames.list_frames()
     assert "test_brain_mri" in session.frames.list_frames()
     assert "test_brain_voxel_to_mri" in session.transforms.list_transforms()
-    assert "test_brain_mri_to_voxel" in session.transforms.list_transforms()
+    assert "test_brain_mri_to_voxel" not in session.transforms.list_transforms()
     assert "Imported MRI image: test_brain" in info
 
 
@@ -64,6 +64,7 @@ def test_mri_import_detects_nii_gz(session, nifti_gz_file):
     assert image.frame.name == "subject01_T1_mri"
     assert session.get_image("subject01_T1") is image
     assert "subject01_T1_voxel_to_mri" in session.transforms.list_transforms()
+    assert "subject01_T1_mri_to_voxel" not in session.transforms.list_transforms()
     assert "Orientation:" in info
 
 

@@ -1,10 +1,10 @@
 import json
-import sys
 from pathlib import Path
-from io import StringIO
 
 from cli import main as cli_main
 from cli.console import Console
+from core.frames import CoordinateFrame
+from core.transform import Transform
 from core.session import Session
 from registry.command_registry import CommandRegistry, register_default_commands
 
@@ -12,12 +12,24 @@ from registry.command_registry import CommandRegistry, register_default_commands
 def test_cli_auto_chain_json(monkeypatch, capsys):
     """Test transform command via interactive CLI with piped input."""
     repo_root = Path(__file__).resolve().parents[1]
-    registry_path = repo_root / "transforms.json"
-    assert registry_path.exists()
     monkeypatch.chdir(repo_root)
 
     # Create session and registry
     session = Session(subject_id="test", description="Test session")
+    session.add_frame(CoordinateFrame("head", ("R", "A", "S"), "mm"))
+    session.add_frame(CoordinateFrame("mri", ("R", "A", "S"), "mm"))
+    session.add_frame(CoordinateFrame("mni", ("R", "A", "S"), "mm"))
+    head = session.get_frame("head")
+    mri = session.get_frame("mri")
+    mni = session.get_frame("mni")
+    session.add_transform(
+        "head_to_mri",
+        Transform(head, mri, [[1, 0, 0, 1], [0, 1, 0, 2], [0, 0, 1, 3], [0, 0, 0, 1]]),
+    )
+    session.add_transform(
+        "mri_to_mni",
+        Transform(mri, mni, [[1, 0, 0, -1], [0, 1, 0, -2], [0, 0, 1, -3], [0, 0, 0, 1]]),
+    )
     registry = CommandRegistry()
     register_default_commands(registry)
     
@@ -51,18 +63,15 @@ def test_cli_auto_chain_json(monkeypatch, capsys):
     
     # Check output
     output = capsys.readouterr().out
-    # Look for JSON output (last non-empty line should be JSON)
-    for line in reversed(output.split('\n')):
-        if line.strip():
-            try:
-                data = json.loads(line)
-                assert data["input"]["frame"] == "head"
-                assert data["output"]["frame"] == "mni"
-                assert data["output"]["coords"] == [0.0, 0.0, 0.0]
-                assert [step["name"] for step in data["chain"]] == [
-                    "head_to_mri",
-                    "mri_to_mni",
-                ]
-                break
-            except json.JSONDecodeError:
-                continue
+    lines = [line for line in output.splitlines() if line.strip()]
+    start_index = next(index for index, line in enumerate(lines) if line.strip() == "{")
+    end_index = len(lines) - 1 - next(index for index, line in enumerate(reversed(lines)) if line.strip() == "}")
+    data = json.loads("\n".join(lines[start_index : end_index + 1]))
+
+    assert data["input"]["frame"] == "head"
+    assert data["output"]["frame"] == "mni"
+    assert data["output"]["coords"] == [0.0, 0.0, 0.0]
+    assert [step["name"] for step in data["chain"]] == [
+        "head_to_mri",
+        "mri_to_mni",
+    ]
