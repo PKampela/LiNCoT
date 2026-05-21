@@ -9,6 +9,8 @@ TMSCoords is a lightweight neuroimaging coordinate transformation tool for TMS w
 - Backends are isolated from the core domain model.
 - The CLI is session-based, so points, images, frames, and loaded transforms can be reused across commands.
 
+For a fuller command reference and Python API notes, see [docsMaterial.md](docsMaterial.md).
+
 ## Environment
 
 The repository includes a Conda environment definition in `environment.yml`.
@@ -16,28 +18,6 @@ The repository includes a Conda environment definition in `environment.yml`.
 ```bash
 conda env create -f environment.yml
 conda activate tmslabs
-```
-
-## Python API example
-
-From the repository root:
-
-```python
-import numpy as np
-
-from core.frames import CoordinateFrame
-from core.point import Point
-from core.transform import Transform
-
-head = CoordinateFrame("head", ("R", "A", "S"), "mm")
-mri = CoordinateFrame("mri", ("R", "A", "S"), "mm")
-
-transform = Transform(head, mri, np.eye(4))
-point = Point(np.array([1.0, 2.0, 3.0]), head)
-result = transform.apply(point)
-
-print(result.frame.name)
-print(result.coords)
 ```
 
 ## Neuroimaging operations
@@ -58,21 +38,16 @@ Typical operations:
 
 ### Transform operations
 
-- Apply a transform between two frames to a single 3D coordinate.
+- Apply a transform between two frames to a stored point.
 - Resolve multi-step transform chains automatically from the registered transforms.
 - Inspect the selected chain, the composed matrix, or an explanation of how the chain was chosen.
-- List all registered transforms in the session.
 
 Typical operations:
 
 - transform
 - transform list
 
-Backend helpers exposed in Python:
-
-- load_mne_transform
-- head_to_mri_transform
-- mri_to_mni_transform
+See [docsMaterial.md](docsMaterial.md) for command details and Python helpers.
 
 ### Volume and image operations
 
@@ -85,16 +60,8 @@ Backend helpers exposed in Python:
 Typical operations:
 
 - volume load
+- volume import
 - view volume
-
-Python helpers:
-
-- load_nifti
-- load_nifti_image
-- voxel_to_world_transform
-- world_to_voxel_transform
-- transform_image
-- sample_volume
 
 ### Surface operations
 
@@ -109,16 +76,6 @@ Typical operations:
 
 - surface list
 - view surface
-
-Python helpers:
-
-- transform_surface
-- closest_vertex
-- distance_to_surface
-- bounding_box
-- face_normals
-- project_to_surface
-- projection_normal
 
 ### Session and registry operations
 
@@ -180,9 +137,7 @@ The following session shows a realistic TMS-style flow: load an MRI volume, regi
 
 In a full workflow, the transformed point can be used to guide coil placement, compare against anatomical surfaces, or sample values from the MRI volume at the target location.
 
-## Repository examples
-
-See the `examples/` directory for small API-driven examples, including loading NIfTI data and applying a single point transform.
+For the full command and API notes, see [docsMaterial.md](docsMaterial.md).
 
 ## Installation
 
@@ -226,45 +181,5 @@ tmscoords --gui
 python launcher.py --gui
 ```
 
-Python API example (use from an installed or editable install):
-
-```python
-from core.session import Session
-from core.frames import CoordinateFrame
-
-session = Session()
-session.add_frame(CoordinateFrame("head", ("R","A","S"), "mm"))
-```
-
-## Building and publishing
-
-Build source and wheel distributions:
-
-```bash
-python -m pip install --upgrade build twine
-python -m build
-```
-
-Upload to PyPI (requires credentials):
-
-```bash
-python -m twine upload dist/*
-```
-
-## Testing
-
-Run the full test suite locally:
-
-```bash
-python -m pip install -e .
-python -m pytest -q
-```
-
-## Notes & troubleshooting
-
-- We standardized on absolute package imports and removed `sys.path` hacks to avoid
-	"attempted relative import beyond top-level package" errors when running `pytest` or
-	launching the app with `python -m`.
-- If you encounter binary dependency issues on Windows, prefer creating the recommended
-	conda environment (`environment.yml`) before `pip install`.
+For build notes, tests, troubleshooting, and API details, see [docsMaterial.md](docsMaterial.md).
 
