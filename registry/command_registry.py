@@ -5,13 +5,16 @@ from __future__ import annotations
 import json
 from collections import deque
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 
 from core.import_service import import_image as import_mri_image
+from core.import_service import import_surface as import_surface_file
 from core.chain import TransformChain
 from core.frames import CoordinateFrame
+from core.registration import register_images, registration_report_lines
 from core.point import Point
 from core.session import Session
 from registry.frame_registry import FrameRegistry
@@ -137,6 +140,74 @@ def _cmd_surface_list(session: Session, args: Sequence[str], kwargs: Dict[str, A
     )
 
 
+def _cmd_surface_import(session: Session, args: Sequence[str], kwargs: Dict[str, Any]) -> CommandResult:
+    _expect_arg_count("surface.import", args, 1)
+    path = args[0]
+    frame_name = kwargs.get("frame")
+    surface_name = kwargs.get("name")
+
+    try:
+        surface, info_msg = import_surface_file(
+            session,
+            path,
+            frame_name=frame_name,
+            surface_name=surface_name,
+        )
+    except Exception as exc:
+        raise CommandExecutionError(f"Failed to import surface: {exc}") from exc
+
+    first_line = info_msg.splitlines()[0] if info_msg else f"Imported surface: {Path(path).stem}"
+    resolved_name = first_line.split(":", 1)[-1].strip() if ":" in first_line else Path(path).stem
+
+    payload: Dict[str, object] = {
+        "surface": {
+            "name": resolved_name,
+            "path": path,
+            "frame": surface.frame.name,
+            "vertices": int(surface.vertices.shape[0]),
+            "faces": int(surface.faces.shape[0]),
+        }
+    }
+
+    return CommandResult(
+        message=info_msg,
+        data=payload,
+        output_format="json" if kwargs.get("json") else "text",
+    )
+
+
+def _cmd_surface_import(session: Session, args: Sequence[str], kwargs: Dict[str, Any]) -> CommandResult:
+    _expect_arg_count("surface.import", args, 1)
+    path = args[0]
+    frame_name = kwargs.get("frame")
+    surface_name = kwargs.get("name")
+    try:
+        surface, info_msg = import_surface_file(
+            session,
+            path,
+            frame_name=frame_name,
+            surface_name=surface_name,
+        )
+    except Exception as exc:
+        raise CommandExecutionError(f"Failed to import surface: {exc}") from exc
+
+    payload: Dict[str, object] = {
+        "surface": {
+            "name": surface_name or Path(path).name.replace(".", "_"),
+            "path": path,
+            "frame": surface.frame.name,
+            "vertices": int(surface.vertices.shape[0]),
+            "faces": int(surface.faces.shape[0]),
+        }
+    }
+
+    return CommandResult(
+        message=info_msg,
+        data=payload,
+        output_format="json" if kwargs.get("json") else "text",
+    )
+
+
 def _cmd_view_surface(session: Session, args: Sequence[str], kwargs: Dict[str, Any]) -> CommandResult:
     _expect_arg_count("view.surface", args, 1)
     surface_name = args[0]
@@ -202,6 +273,106 @@ def _cmd_session_summary(session: Session, args: Sequence[str], kwargs: Dict[str
             f"{len(summary['points'])} points, {len(summary['images'])} images"
         ),
         data=summary,
+    )
+
+
+def _unique_transform_name(session: Session, preferred: str) -> str:
+    existing = session.transforms.list_transforms()
+    if preferred not in existing:
+        return preferred
+    index = 1
+    while f"{preferred}_{index}" in existing:
+        index += 1
+    return f"{preferred}_{index}"
+
+
+def _cmd_register(
+    session: Session,
+    args: Sequence[str],
+    kwargs: Dict[str, Any],
+) -> CommandResult:
+
+    command_name = "register"
+    _expect_arg_count(command_name, args, 2)
+
+    moving_name, reference_name = args
+
+    try:
+        moving_image = session.get_image(moving_name)
+    except KeyError as exc:
+        raise CommandExecutionError(
+            f"Unknown moving image: {moving_name}"
+        ) from exc
+
+    try:
+        reference_image = session.get_image(reference_name)
+    except KeyError as exc:
+        raise CommandExecutionError(
+            f"Unknown reference image: {reference_name}"
+        ) from exc
+
+    quality = str(kwargs.get("quality", "standard"))
+
+    explicit_name = kwargs.get("name")
+    transform_name = str(explicit_name).strip() if explicit_name else ""
+
+    if not transform_name:
+        transform_name = _unique_transform_name(
+            session,
+            f"register_{moving_name}_to_{reference_name}",
+        )
+
+    try:
+        transform, report = register_images(
+            moving_image,
+            reference_image,
+            quality=quality,
+        )
+
+    except Exception as exc:
+        raise CommandExecutionError(
+            f"Failed to register images: {exc}"
+        ) from exc
+
+    session.add_transform(transform_name, transform)
+
+    report_lines = [
+        f"Registered transform '{transform_name}'",
+        f"  Moving: {moving_name}",
+        f"  Reference: {reference_name}",
+        f"  Quality: {report.quality}",
+    ] + [
+        f"  {line}"
+        for line in registration_report_lines(report)
+    ]
+
+    report_text = "\n".join(report_lines)
+
+    payload = {
+        "transform": {
+            "name": transform_name,
+            "source": transform.source.name,
+            "target": transform.target.name,
+            "matrix": transform.matrix.tolist(),
+        },
+        "registration": {
+            "quality": report.quality,
+            "iterations": report.iterations,
+            "similarity": report.similarity,
+            "translation_mm": report.translation_mm,
+            "rotation_deg": report.rotation_deg,
+        },
+        "report": report_text,
+    }
+
+    message = report_lines[0]
+    if kwargs.get("report"):
+        message = report_text
+
+    return CommandResult(
+        message=message,
+        data=payload,
+        output_format="json" if kwargs.get("json") else "text",
     )
 
 
@@ -679,9 +850,11 @@ def register_default_commands(registry: CommandRegistry) -> None:
     registry.register("transform.list", _cmd_transform_list, "transform list")
     registry.register("volume.load", _cmd_volume_load, "volume load <path> [--json]")
     registry.register("volume.import", _cmd_volume_import, "volume import <path> [--json]")
+    registry.register("surface.import", _cmd_surface_import, "surface import <path> [--name name] [--frame frame] [--json]")
     registry.register("surface.list", _cmd_surface_list, "surface list")
     registry.register("view.surface", _cmd_view_surface, "view surface <name> [--json]")
     registry.register("view.volume", _cmd_view_volume, "view volume <name> [--json]")
+    registry.register("register", _cmd_register, "register <moving> <reference> [--quality fast|standard|accurate] [--name name] [--report] [--json]")
     registry.register("session.summary", _cmd_session_summary, "session summary")
 
     def _help_wrapper(session: Session, args: Sequence[str], kwargs: Dict[str, Any]) -> CommandResult:

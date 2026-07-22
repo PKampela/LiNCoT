@@ -25,8 +25,12 @@ class ViewerTab(QWidget):
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
 
-        header = QHBoxLayout()
+        self._header_widget = QWidget(self)
+        header = QHBoxLayout(self._header_widget)
+        header.setContentsMargins(0, 0, 0, 0)
+        header.setSpacing(6)
         self._title_label = QLabel(title)
         self._title_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         self._status_label = QLabel("")
@@ -40,29 +44,19 @@ class ViewerTab(QWidget):
         header.addStretch(1)
         header.addWidget(self._status_label)
         header.addWidget(self._reset_button)
-        root.addLayout(header)
+        root.addWidget(self._header_widget)
 
         content = QHBoxLayout()
         content.setContentsMargins(0, 0, 0, 0)
         self._content_layout = content
 
         sidebar = QWidget()
-        sidebar.setMinimumWidth(240)
-        sidebar.setMaximumWidth(320)
+        sidebar.setMinimumWidth(120)
+        sidebar.setMaximumWidth(300)
         sidebar_layout = QVBoxLayout(sidebar)
         self._sidebar_layout = sidebar_layout
         sidebar_layout.setContentsMargins(8, 8, 8, 8)
         sidebar_layout.setSpacing(8)
-
-        sidebar_title = QLabel("Workflow Details")
-        sidebar_title.setObjectName("viewerSidebarTitle")
-        sidebar_layout.addWidget(sidebar_title)
-
-        self._meta_summary = QLabel(
-            "This panel shows the active object’s reference frame, size, and TMS-relevant notes."
-        )
-        self._meta_summary.setWordWrap(True)
-        sidebar_layout.addWidget(self._meta_summary)
 
         self._meta_layout = QFormLayout()
         self._meta_layout.setLabelAlignment(Qt.AlignmentFlag.AlignLeft)
@@ -84,6 +78,9 @@ class ViewerTab(QWidget):
         self._title = title
         self._title_label.setText(title)
 
+    def hide_header(self) -> None:
+        self._header_widget.hide()
+
     def set_status(self, text: str) -> None:
         self._status_label.setText(text)
 
@@ -96,14 +93,14 @@ class ViewerTab(QWidget):
                 row.fieldItem.widget().deleteLater()
 
         if not items:
-            self._meta_summary.setText(
-                "No object is loaded yet. Open a volume or surface to see frame, size, and planning details."
-            )
             return
 
-        self._meta_summary.setText("Current object metadata and planning notes")
         for key, value in items:
-            self._meta_layout.addRow(key, QLabel(value))
+            label = QLabel(value)
+            label.setWordWrap(True)
+            label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+
+            self._meta_layout.addRow(key, label)
 
     def reset_camera(self) -> None:
         if self._default_camera_position is None:

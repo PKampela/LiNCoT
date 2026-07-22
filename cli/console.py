@@ -8,7 +8,7 @@ from typing import List
 
 @dataclass
 class Console:
-    prompt: str = "tmscoords> "
+    prompt: str = "tmslabs> "
     history: List[str] = field(default_factory=list)
 
     def read_input(self) -> str:

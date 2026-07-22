@@ -2,79 +2,77 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Optional, cast
+from typing import cast
 
 import numpy as np
+from nibabel import as_closest_canonical
+from nibabel.nifti1 import Nifti1Image
 
 from core.frames import CoordinateFrame
 from core.image import Image
 from core.transform import Transform
-from nibabel.nifti1 import Nifti1Image
 
 
-@dataclass(frozen=True)
-class MRIImageInfo:
-    """Minimal MRI image metadata extracted via NiBabel."""
+def _load_canonical(path: str) -> Nifti1Image:
+    """
+    Load a NIfTI image and convert it to canonical RAS voxel order.
 
-    path: str
-    shape: tuple[int, ...]
-    affine: np.ndarray
-
-
-def load_nifti(path: str) -> MRIImageInfo:
-    """Load a NIfTI image and return minimal metadata.
-
-    This function hides NiBabel objects from the user.
+    All functions in this backend operate on canonical images so that
+    voxel ordering is consistent regardless of how the file was stored.
     """
     from nibabel import loadsave
 
     img = cast(Nifti1Image, loadsave.load(path))
-    affine = np.asarray(img.affine, dtype=float)
-    return MRIImageInfo(path=path, shape=img.shape, affine=affine)
+    return as_closest_canonical(img)
 
 
-def load_nifti_image(path: str, frame: CoordinateFrame) -> Image:
-    """Load a NIfTI image and return data with affine and frame."""
-    from nibabel import loadsave
+def load_nifti_image(
+    path: str,
+    frame: CoordinateFrame,
+) -> Image:
+    """
+    Load a NIfTI image in canonical RAS voxel order.
+    """
 
-    img = cast(Nifti1Image, loadsave.load(path))
-    data = np.asarray(img.dataobj)
-    affine = np.asarray(img.affine, dtype=float)
-    return Image(data=data, affine=affine, frame=frame)
+    img = _load_canonical(path)
 
-
-def _select_affine(info: MRIImageInfo, sform: Optional[np.ndarray], qform: Optional[np.ndarray]) -> np.ndarray:
-    if sform is not None and np.any(sform):
-        return np.asarray(sform, dtype=float)
-    if qform is not None and np.any(qform):
-        return np.asarray(qform, dtype=float)
-    return info.affine
+    return Image(
+        data=np.asarray(img.dataobj),
+        affine=np.asarray(img.affine, dtype=float),
+        frame=frame,
+    )
 
 
 def voxel_to_world_transform(
-    info: MRIImageInfo,
+    image: Image,
     voxel_frame: CoordinateFrame,
     world_frame: CoordinateFrame,
-    prefer_sform: bool = True,
 ) -> Transform:
-    """Create a voxel -> world transform using qform/sform/affine."""
+    """
+    Create the voxel -> world transform for an imported image.
 
-    from nibabel import loadsave
+    Since Image.affine already represents the canonical voxel-to-world
+    transform, this simply wraps it as a Transform object.
+    """
 
-    img = cast(Nifti1Image, loadsave.load(info.path))
-    sform = img.get_sform()
-    qform = img.get_qform()
-    matrix = _select_affine(info, sform if prefer_sform else qform, qform if prefer_sform else sform)
-    return Transform(source=voxel_frame, target=world_frame, matrix=matrix)
+    return Transform(
+        source=voxel_frame,
+        target=world_frame,
+        matrix=image.affine.copy(),
+    )
 
 
 def world_to_voxel_transform(
-    info: MRIImageInfo,
+    image: Image,
     voxel_frame: CoordinateFrame,
     world_frame: CoordinateFrame,
-    prefer_sform: bool = True,
 ) -> Transform:
-    """Create a world -> voxel transform using qform/sform/affine."""
+    """
+    Create the world -> voxel transform for an imported image.
+    """
 
-    return voxel_to_world_transform(info, voxel_frame, world_frame, prefer_sform).invert()
+    return voxel_to_world_transform(
+        image,
+        voxel_frame,
+        world_frame,
+    ).invert()

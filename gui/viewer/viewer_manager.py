@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Any, Callable, Optional, cast
 
 from PySide6.QtWidgets import QLabel, QTabWidget, QVBoxLayout, QWidget
 
@@ -33,9 +33,15 @@ class _UnavailableViewer(QWidget):
 class ViewerManager:
     """Manage tabbed viewers and simple viewer type mapping."""
 
-    def __init__(self, tabs: QTabWidget, session: Session) -> None:
+    def __init__(
+        self,
+        tabs: QTabWidget,
+        session: Session,
+        registration_callback: Callable[[str | None], None] | None = None,
+    ) -> None:
         self._tabs = tabs
         self._session = session
+        self._registration_callback = registration_callback
         self._viewer_backend_error: str | None = None
 
     def create_viewer_tab(self, viewer_type: str, title: str | None = None) -> QWidget:
@@ -80,15 +86,19 @@ class ViewerManager:
     def open_surface(self, surface_name: str) -> QWidget:
         surface = self._session.get_surface(surface_name)
         viewer = self.create_viewer_tab("surface", f"Surface: {surface_name}")
-        if hasattr(viewer, "load_surface"):
-            viewer.load_surface(surface_name, surface, session=self._session)
+        viewer_any = cast(Any, viewer)
+        if hasattr(viewer_any, "load_surface"):
+            viewer_any.load_surface(surface_name, surface, session=self._session)
         return viewer
 
     def open_volume(self, image_name: str) -> QWidget:
         image = self._session.get_image(image_name)
         viewer = self.create_viewer_tab("volume", f"Volume: {image_name}")
-        if hasattr(viewer, "load_image"):
-            viewer.load_image(image_name, image, session=self._session)
+        viewer_any = cast(Any, viewer)
+        if hasattr(viewer_any, "load_image"):
+            viewer_any.load_image(image_name, image, session=self._session)
+        if hasattr(viewer_any, "set_registration_request_handler"):
+            viewer_any.set_registration_request_handler(self._registration_callback)
         return viewer
 
     def open_from_descriptor(self, descriptor: dict | None) -> Optional[QWidget]:
@@ -108,10 +118,11 @@ class ViewerManager:
             viewer = self._tabs.widget(index)
             if viewer is None:
                 continue
-            if hasattr(viewer, "refresh_from_session"):
-                viewer.refresh_from_session(self._session)
-            elif hasattr(viewer, "update_scene"):
-                viewer.update_scene()
+            viewer_any = cast(Any, viewer)
+            if hasattr(viewer_any, "refresh_from_session"):
+                viewer_any.refresh_from_session(self._session)
+            elif hasattr(viewer_any, "update_scene"):
+                viewer_any.update_scene()
 
     def close_tab(self, index: int) -> None:
         widget = self._tabs.widget(index)

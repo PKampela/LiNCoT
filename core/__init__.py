@@ -1,4 +1,4 @@
-"""Core data model for tmscoords."""
+"""Core data model for TMSLabs."""
 
 from .frames import CoordinateFrame
 from .image import Image, transform_image

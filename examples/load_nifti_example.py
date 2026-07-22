@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Example script demonstrating how to load a NIfTI volume with nibabel and tmscoords.
+"""Example script demonstrating how to load a NIfTI volume with nibabel and TMSLabs.
 
 This example shows:
 1. Loading a NIfTI file using nibabel
@@ -19,7 +19,7 @@ import matplotlib.pyplot as plt
 from nibabel import loadsave
 from nibabel.nifti1 import Nifti1Image
 
-# Import tmscoords modules
+# Import TMSLabs modules
 from core.frames import CoordinateFrame
 from core.transform import Transform
 from core.point import Point

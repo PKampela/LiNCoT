@@ -3,9 +3,9 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "tmscoords"
+name = "TMSLabs"
 version = "0.1.0"
-description = "TMS coordinate transformation tool"
+description = "TMSLabs coordinate transformation tool"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
@@ -19,7 +19,7 @@ dependencies = [
 ]
 
 [project.scripts]
-tmscoords = "launcher:main"
+tmslabs = "launcher:main"
 
 [tool.setuptools]
 py-modules = ["launcher"]

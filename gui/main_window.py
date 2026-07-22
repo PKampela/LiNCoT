@@ -1,4 +1,4 @@
-"""Main Qt window for TMSCoords GUI."""
+"""Main Qt window for TMSLabs GUI."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ from pathlib import Path
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
+    QApplication,
     QDialog,
     QDialogButtonBox,
     QFileDialog,
@@ -17,6 +18,7 @@ from PySide6.QtWidgets import (
     QMenu,
     QMessageBox,
     QPlainTextEdit,
+    QProgressDialog,
     QSplitter,
     QTabWidget,
     QVBoxLayout,
@@ -24,13 +26,13 @@ from PySide6.QtWidgets import (
 )
 
 from core.session import Session
-from core.import_service import preview_xfm_transform, get_file_extension
+from core.import_service import format_xfm_preview, get_file_extension, preview_xfm_transform
 from gui.console_widget import ConsoleWidget
+from gui.registration_dialog import RegistrationDialog
 from gui.session_inspector import SessionInspectorWidget
 from gui.viewer.viewer_manager import ViewerManager
 from registry.command_registry import CommandRegistry
 from registry.transform_registry import TransformRegistry
-from core.import_service import format_xfm_preview, preview_xfm_transform, get_file_extension
 
 
 class XfmImportDialog(QDialog):
@@ -71,17 +73,59 @@ class XfmImportDialog(QDialog):
         return self._target_edit.text().strip()
 
 
+class SurfaceImportDialog(QDialog):
+    def __init__(self, path: str, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Import Surface")
+
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+
+        self._name_edit = QLineEdit()
+        self._frame_edit = QLineEdit()
+        form.addRow("Surface name", self._name_edit)
+        form.addRow("Frame name", self._frame_edit)
+        layout.addLayout(form)
+
+        preview = QPlainTextEdit()
+        preview.setReadOnly(True)
+        preview.setPlainText(
+            "Import a FreeSurfer-style surface such as lh.pial, lh.white, lh.sphere, or outer_skin.surf.\n"
+            f"File: {Path(path).name}\n\n"
+            "If no name is provided, the loader will infer one from the filename.\n"
+            "If no frame is provided, cortical surfaces default to surface_ras and scalp/skull .surf files default to head."
+        )
+        preview.setMinimumHeight(180)
+        layout.addWidget(preview)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+        self._path = path
+
+    @property
+    def surface_name(self) -> str:
+        return self._name_edit.text().strip()
+
+    @property
+    def frame_name(self) -> str:
+        return self._frame_edit.text().strip()
+
+
 class MainWindow(QMainWindow):
     def __init__(self, session: Session, command_registry: CommandRegistry) -> None:
         super().__init__()
         self._session = session
         self._command_registry = command_registry
 
-        self.setWindowTitle("TMSCoords")
+        self.setWindowTitle("TMSLabs")
         self.resize(1400, 900)
 
         self._build_ui()
         self._build_menus()
+        self._connect_context_menus()
         self._refresh_session()
         self._rebuild_object_menus()
 
@@ -105,7 +149,11 @@ class MainWindow(QMainWindow):
         self.viewer_tabs.setMovable(True)
         self.viewer_tabs.tabCloseRequested.connect(self._close_viewer_tab)
 
-        self.viewer_manager = ViewerManager(self.viewer_tabs, self._session)
+        self.viewer_manager = ViewerManager(
+            self.viewer_tabs,
+            self._session,
+            registration_callback=self._open_registration_dialog,
+        )
         self.viewer_manager.create_viewer_tab("base", "Overview")
 
         self.console_widget = ConsoleWidget(
@@ -113,11 +161,12 @@ class MainWindow(QMainWindow):
             self._command_registry,
             viewer_manager=self.viewer_manager,
             on_session_changed=self._on_session_changed,
+            on_status=self._set_status,
         )
 
         top_splitter.addWidget(self.viewer_tabs)
         top_splitter.addWidget(self.console_widget)
-        top_splitter.setStretchFactor(0, 3)
+        top_splitter.setStretchFactor(0, 4)
         top_splitter.setStretchFactor(1, 1)
 
         self.inspector = SessionInspectorWidget()
@@ -144,10 +193,12 @@ class MainWindow(QMainWindow):
 
         self._file_menu = menu_bar.addMenu("&File")
         self._session_menu = menu_bar.addMenu("&Session")
+        self._registration_menu = menu_bar.addMenu("&Registration")
         self._view_menu = menu_bar.addMenu("&View")
         self._help_menu = menu_bar.addMenu("&Help")
 
         self._file_menu.addAction(self._action("Import MRI Image...", self._import_mri_dialog))
+        self._file_menu.addAction(self._action("Import Surface...", self._import_surface_dialog))
         self._file_menu.addAction(self._action("Import Transform...", self._import_transform_dialog))
         self._file_menu.addAction(self._action("Load Transform Registry...", self._load_transform_registry_dialog))
         self._file_menu.addAction(self._action("Save Transform Registry...", self._save_transform_registry_dialog))
@@ -164,6 +215,8 @@ class MainWindow(QMainWindow):
         self._session_menu.addAction(self._action("Show Surfaces", self.inspector.show_surfaces))
         self._session_menu.addAction(self._action("Show Frames", self.inspector.show_frames))
 
+        self._registration_menu.addAction(self._action("Register Images...", self._open_registration_dialog))
+
         self._view_menu.addAction(self._action("Reset Active View", self._reset_active_view))
         self._view_menu.addAction(self._action("Focus Console", self._focus_console))
         self._view_menu.addSeparator()
@@ -173,7 +226,29 @@ class MainWindow(QMainWindow):
 
         self._help_menu.addAction(self._action("Command Reference", self._show_command_reference))
         self._help_menu.addSeparator()
-        self._help_menu.addAction(self._action("About TMSCoords", self._show_about))
+        self._help_menu.addAction(self._action("About TMSLabs", self._show_about))
+
+    def _connect_context_menus(self) -> None:
+        self.inspector.images_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.inspector.images_table.customContextMenuRequested.connect(self._show_image_context_menu)
+
+    def _show_image_context_menu(self, position) -> None:
+        index = self.inspector.images_table.indexAt(position)
+        if not index.isValid():
+            return
+
+        row = index.row()
+        item = self.inspector.images_table.item(row, 0)
+        if item is None:
+            return
+
+        image_name = item.text().strip()
+        if not image_name:
+            return
+
+        menu = QMenu(self)
+        menu.addAction(self._action("Register to...", lambda: self._open_registration_dialog(moving_image_name=image_name)))
+        menu.exec(self.inspector.images_table.viewport().mapToGlobal(position))
 
     def _action(self, text: str, slot) -> QAction:
         action = QAction(text, self)
@@ -244,6 +319,39 @@ class MainWindow(QMainWindow):
         self._refresh_session()
         self._set_status("MRI imported", info_msg, timeout=8000, level="info")
 
+    def _import_surface_dialog(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Import Surface",
+            str(Path.cwd()),
+            "Surface files (*.pial *.white *.sphere *.surf *.inflated *.orig *.smoothwm);;All files (*.*)",
+        )
+        if not path:
+            return
+
+        dialog = SurfaceImportDialog(path, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        self._import_surface_from_path(path, surface_name=dialog.surface_name or None, frame_name=dialog.frame_name or None)
+
+    def _import_surface_from_path(self, path: str, surface_name: str | None = None, frame_name: str | None = None) -> None:
+        try:
+            surface, info_msg = self._session.import_surface(path, frame_name=frame_name, surface_name=surface_name)
+        except Exception as exc:
+            self._set_status("Surface import failed", str(exc), timeout=8000, level="error")
+            return
+
+        first_line = info_msg.splitlines()[0] if info_msg else "Imported surface: " + Path(path).stem
+        imported_name = first_line.split(":", 1)[-1].strip() if ":" in first_line else Path(path).stem
+        try:
+            self.viewer_manager.open_surface(imported_name)
+        except Exception as exc:
+            QMessageBox.warning(self, "Import Surface", f"Surface imported but viewer could not open: {exc}")
+
+        self._refresh_session()
+        self._set_status("Surface imported", info_msg, timeout=8000, level="info")
+
     def _import_transform_dialog(self) -> None:
         """Open file dialog to import a transform."""
         path, _ = QFileDialog.getOpenFileName(
@@ -298,6 +406,66 @@ class MainWindow(QMainWindow):
         self._refresh_session()
         # Show concise success message in status bar; details available on click
         self._set_status("Transform imported", info_msg, timeout=8000, level="info")
+
+    def _open_registration_dialog(self, moving_image_name: str | None = None) -> None:
+        image_names = self._session.list_images()
+        if len(image_names) < 2:
+            QMessageBox.information(
+                self,
+                "Register Images",
+                "At least two images are required to run a registration.",
+            )
+            return
+
+        try:
+            dialog = RegistrationDialog(
+                image_names,
+                moving_image_name=moving_image_name,
+                parent=self,
+            )
+        except ValueError as exc:
+            QMessageBox.information(self, "Register Images", str(exc))
+            return
+
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        progress = QProgressDialog("Registering images...", None, 0, 0, self)
+        progress.setWindowTitle("Register Images")
+        progress.setWindowModality(Qt.WindowModality.ApplicationModal)
+        progress.setCancelButton(None)
+        progress.setMinimumDuration(0)
+        progress.show()
+        QApplication.processEvents()
+
+        kwargs: dict[str, object] = {
+            "quality": dialog.quality,
+            "report": True,
+        }
+
+        if dialog.transform_name:
+            kwargs["name"] = dialog.transform_name
+
+        try:
+            result = self._command_registry.execute(
+                self._session,
+                "register",
+                [
+                    dialog.moving_image_name,
+                    dialog.reference_image_name,
+                ],
+                kwargs,
+            )
+        except Exception as exc:
+            progress.close()
+            self._set_status("Registration failed", str(exc), timeout=8000, level="error")
+            return
+
+        progress.close()
+        self._refresh_session()
+
+        report = result.data.get("report") if result.data else result.message
+        self._set_status("Registration complete", str(report), timeout=8000, level="info")
 
     def _load_transform_registry_dialog(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -443,8 +611,8 @@ class MainWindow(QMainWindow):
     def _show_about(self) -> None:
         QMessageBox.information(
             self,
-            "About TMSCoords",
-            "TMSCoords provides a GUI for viewing neuroimaging volumes, surfaces, transforms, and session state.",
+            "About TMSLabs",
+            "TMSLabs provides a GUI for viewing neuroimaging volumes, surfaces, transforms, and session state.",
         )
 
     def _set_status(self, short_msg: str, detailed: str | None = None, timeout: int = 8000, level: str = "info") -> None:

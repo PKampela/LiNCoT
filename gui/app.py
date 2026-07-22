@@ -70,11 +70,14 @@ def _apply_theme(app: QApplication) -> None:
             qproperty-drawBase: 0;
         }
         QTabWidget::pane {
-            border: 1px solid #cbd5e1;
-            border-top: 0;
-            margin-top: -1px;
-            border-radius: 0 10px 10px 10px;
             background: #ffffff;
+            border: 1px solid #cbd5e1;
+            border-top: none;
+            border-bottom-left-radius: 10px;
+            border-bottom-right-radius: 10px;
+        }
+        QTabWidget > QWidget {
+            background: transparent;
         }
         QTabBar::tab {
             background: #e2e8f0;
@@ -90,7 +93,7 @@ def _apply_theme(app: QApplication) -> None:
         }
         QTabBar::tab:selected {
             background: #ffffff;
-            margin-bottom: -1px;
+            margin-bottom: 1px;
         }
         QTabBar::close-button {
             image: url("%s");
@@ -121,6 +124,15 @@ def _apply_theme(app: QApplication) -> None:
             font-size: 14px;
             font-weight: 600;
             color: #0f172a;
+        }
+        #sessionInspector QPlainTextEdit,
+        #sessionInspector QTableWidget {
+            background: transparent;
+            border: none;
+        }
+
+        #sessionInspector QHeaderView::section {
+            background: #f1f5f9;
         }
         QStatusBar {
             background: #f8fafc;

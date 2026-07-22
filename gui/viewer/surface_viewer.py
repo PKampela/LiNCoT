@@ -14,7 +14,8 @@ from .viewer_tab import ViewerTab
 
 class SurfaceViewer(ViewerTab):
     def __init__(self) -> None:
-        super().__init__(title="Surface Viewer")
+        super().__init__(title="")
+        self.hide_header()
         self._surface: Surface | None = None
         self._surface_name: Optional[str] = None
         self._session: Session | None = None
@@ -29,18 +30,31 @@ class SurfaceViewer(ViewerTab):
         self.plotter.add_mesh(
             mesh,
             name="surface_mesh",
-            color="#7dd3fc",
-            opacity=0.92,
+            scalars="mean_curvature" if "mean_curvature" in mesh.point_data else None,
+            show_scalar_bar=False,
+            cmap="coolwarm",
+            clim=(-0.5, 0.5),
+            color="#dbe4ff",
+            opacity=1.0,
             smooth_shading=True,
             show_edges=False,
+            edge_color="#f1f5f9",
+            line_width=0.1,
+            ambient=0.16,
+            diffuse=0.74,
+            specular=0.7,
+            specular_power=36.0,
+            lighting=True,
+            render_lines_as_tubes=False,
+            backface_culling=True,
+            silhouette=True,
         )
-        self.plotter.add_text(surface_name, font_size=12, name="surface_name")
+
 
         if session is not None:
             point_items = [(name, session.get_point(name)) for name in session.list_points()]
             add_points(self.plotter, points_in_frame(point_items, surface.frame.name))
 
-        self.set_title(f"Surface: {surface_name}")
         self.set_metadata([
             ("Object type", "Surface mesh"),
             ("Workflow role", "Scalp or cortical geometry used to judge target position and anatomy alignment"),

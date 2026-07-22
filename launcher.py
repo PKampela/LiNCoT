@@ -1,4 +1,4 @@
-"""Application launcher selecting CLI or GUI interface."""
+"""Application launcher selecting CLI or GUI interface for TMSLabs."""
 
 from __future__ import annotations
 
@@ -10,11 +10,11 @@ from gui.app import run_app
 
 
 def build_session() -> Session:
-    return _bootstrap_session(Session(subject_id="default", description="TMSCoords session"))
+    return _bootstrap_session(Session(subject_id="default", description="TMSLabs session"))
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="tmscoords")
+    parser = argparse.ArgumentParser(prog="tmslabs")
     parser.add_argument("--cli", action="store_true", help="Start in interactive CLI mode")
     parser.add_argument("--gui", action="store_true", help="Start in GUI mode (default)")
     return parser

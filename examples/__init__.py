@@ -1,1 +1,1 @@
-"""Examples for tmscoords."""
+"""Examples for TMSLabs."""

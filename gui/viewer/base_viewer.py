@@ -12,6 +12,7 @@ class BaseViewer(ViewerTab):
 
     def __init__(self, title: str = "Viewer") -> None:
         super().__init__(title=title)
+        self.hide_header()
         self._load_placeholder_scene()
 
     def load_object(self, _obj: object) -> None:
@@ -35,7 +36,6 @@ class BaseViewer(ViewerTab):
             opacity=0.95,
             smooth_shading=True,
         )
-        self._title_label.hide()
         self.set_metadata(
             [
                 ("Scene", "Placeholder geometry"),

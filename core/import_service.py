@@ -32,6 +32,9 @@ class UnsupportedFormatError(ImportError):
     pass
 
 
+_SURFACE_EXTENSIONS = {"pial", "white", "sphere", "surf", "inflated", "orig", "smoothwm"}
+
+
 def get_file_extension(path: str) -> str:
     """Extract a normalized file extension without leading dot.
 
@@ -53,6 +56,22 @@ def _strip_known_extensions(path: str) -> str:
     if lower_name.endswith(".nii"):
         return name[:-4]
     return Path(path).stem
+
+
+def _infer_surface_name(path: str) -> str:
+    name = Path(path).name
+    suffix = Path(path).suffix.lower().lstrip(".")
+    if suffix == "surf":
+        return Path(path).stem
+    return name.replace(".", "_")
+
+
+def _infer_surface_frame_name(path: str) -> str:
+    suffix = Path(path).suffix.lower().lstrip(".")
+    stem = Path(path).stem.lower()
+    if suffix == "surf" and any(token in stem for token in ("skin", "skull")):
+        return "head"
+    return "surface_ras"
 
 
 def _unique_name(preferred: str, existing: list[str]) -> str:
@@ -185,6 +204,71 @@ def import_image(session: Session, path: str) -> tuple["Image", str]:
     )
 
 
+def import_surface(
+    session: Session,
+    path: str,
+    frame_name: str | None = None,
+    surface_name: str | None = None,
+) -> tuple["Surface", str]:
+    """Import a triangular surface mesh into the session."""
+
+    path_obj = Path(path)
+    if not path_obj.exists():
+        raise ImportError(f"File not found: {path}")
+
+    ext = get_file_extension(path)
+    if ext not in _SURFACE_EXTENSIONS:
+        raise UnsupportedFormatError(
+            f"Unsupported surface format: .{ext}\n"
+            f"Supported formats: .pial, .white, .sphere, .surf, .inflated, .orig, .smoothwm"
+        )
+
+    inferred_name = surface_name or _infer_surface_name(path)
+    inferred_frame_name = frame_name or _infer_surface_frame_name(path)
+
+    try:
+        from backends.surface_backend import load_surface_geometry
+    except ImportError as exc:
+        raise ImportError(f"Surface backend not available: {exc}") from exc
+
+    frame_created = False
+    try:
+        frame = session.frames.get_frame(inferred_frame_name)
+    except KeyError:
+        frame = CoordinateFrame(
+            name=inferred_frame_name,
+            axes=("R", "A", "S"),
+            units="mm",
+            description=f"Imported surface frame from {Path(path).name}",
+        )
+        session.frames.register_frame(frame)
+        frame_created = True
+
+    try:
+        surface = load_surface_geometry(path, frame)
+    except Exception as exc:
+        raise ImportError(f"Failed to load surface: {exc}") from exc
+
+    register_name = _unique_name(inferred_name, session.surfaces.list_surfaces())
+    session.add_surface(register_name, surface)
+
+    info_lines = [
+        f"Imported surface: {register_name}",
+        f"  Frame: {surface.frame.name}",
+        f"  File: {Path(path).name}",
+        f"  Vertices: {surface.vertices.shape[0]}",
+        f"  Faces: {surface.faces.shape[0]}",
+    ]
+    if frame_created:
+        info_lines.insert(1, f"  Created frame: {frame.name}")
+    if surface_name is None:
+        info_lines.append(f"  Inferred name from file: {inferred_name}")
+    if frame_name is None:
+        info_lines.append(f"  Inferred frame from file: {inferred_frame_name}")
+
+    return surface, "\n".join(info_lines)
+
+
 def _import_transform_fif(session: Session, path: str) -> tuple[Transform, str]:
     """Import MNE .fif transform file.
 
@@ -315,11 +399,10 @@ def _import_nifti_image(session: Session, path: str) -> tuple["Image", str]:
     """Import a NIfTI MRI image with subject-specific frames and transforms."""
 
     try:
-        from backends.nibabel_backend import load_nifti, load_nifti_image, voxel_to_world_transform
+        from backends.nibabel_backend import load_nifti_image, voxel_to_world_transform
     except ImportError as exc:
         raise ImportError(f"NiBabel backend not available: {exc}") from exc
 
-    info = load_nifti(path)
     image_name = _unique_name(_strip_known_extensions(path), session.list_images())
 
     voxel_frame_name = f"{image_name}_voxel"
@@ -352,7 +435,11 @@ def _import_nifti_image(session: Session, path: str) -> tuple["Image", str]:
     image = load_nifti_image(path, mri_frame)
     session.add_image(image_name, image)
 
-    transform = voxel_to_world_transform(info, voxel_frame, mri_frame)
+    transform = voxel_to_world_transform(
+        image,
+        voxel_frame,
+        mri_frame,
+    )
     _validate_transform(transform)
 
     forward_name = _unique_name(f"{image_name}_voxel_to_mri", session.transforms.list_transforms())

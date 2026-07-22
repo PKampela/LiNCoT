@@ -1,4 +1,4 @@
-"""CLI entry point for tmscoords."""
+"""CLI entry point for TMSLabs."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ from registry.command_registry import (
 
 
 def _bootstrap_session(base_session: Optional[Session] = None) -> Session:
-    session = base_session or Session(subject_id="default", description="Interactive session")
+    session = base_session or Session(subject_id="default", description="Interactive TMSLabs session")
     return session
 
 

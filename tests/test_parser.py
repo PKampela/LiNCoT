@@ -31,6 +31,16 @@ def test_parser_with_value_flags():
     assert parsed.kwargs["frame"] == "mri"
 
 
+def test_parser_registration_command():
+    """Parse the new registration command group."""
+    parsed = parse_command("register rigid moving reference --quality accurate --name reg1 --report")
+    assert parsed.command == "register.rigid"
+    assert parsed.args == ["moving", "reference"]
+    assert parsed.kwargs["quality"] == "accurate"
+    assert parsed.kwargs["name"] == "reg1"
+    assert parsed.kwargs["report"] is True
+
+
 def test_parser_with_list_values():
     """Parse command with flag accepting multiple values."""
     parsed = parse_command("transform p1 mni --chain mat1 mat2 mat3")

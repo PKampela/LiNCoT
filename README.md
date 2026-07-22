@@ -1,6 +1,6 @@
-# TMSCoords
+# TMSLabs
 
-TMSCoords is a lightweight neuroimaging coordinate transformation tool for TMS workflows. It keeps coordinate frames explicit, treats transforms as first-class objects, and provides both a Python API and a stateful interactive CLI.
+TMSLabs is a lightweight neuroimaging coordinate transformation tool for TMS workflows. It keeps coordinate frames explicit, treats transforms as first-class objects, and provides both a Python API and a stateful interactive CLI.
 
 ## Design goals
 
@@ -167,7 +167,7 @@ CLI (after install) — runs the interactive session or start directly from sour
 
 ```bash
 # installed entrypoint
-tmscoords --cli
+tmslabs --cli
 
 # or from source
 python launcher.py --cli
@@ -176,7 +176,7 @@ python launcher.py --cli
 Start the GUI:
 
 ```bash
-tmscoords --gui
+tmslabs --gui
 # or
 python launcher.py --gui
 ```

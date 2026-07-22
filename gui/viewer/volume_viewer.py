@@ -2,17 +2,18 @@
 
 from __future__ import annotations
 
-from typing import Optional
+from dataclasses import dataclass
+from typing import Callable, Optional
 
 import numpy as np
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QImage, QPainter, QPen, QPixmap
-from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QSizePolicy, QSlider, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QMenu, QSizePolicy, QSlider, QVBoxLayout, QWidget
 
 from core.image import Image
 from core.session import Session
 
-from .render_utils import image_orientation, orthogonal_slice_data, voxel_size, voxel_to_world, world_to_voxel
+from .render_utils import anatomical_axis_info, image_orientation, voxel_size, voxel_to_world, world_to_voxel
 from .viewer_tab import ViewerTab
 
 
@@ -25,8 +26,7 @@ class SliceImageLabel(QLabel):
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.setMinimumSize(180, 180)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        self.setFrameShape(QFrame.Shape.StyledPanel)
-        self.setLineWidth(1)
+        self.setFrameShape(QFrame.Shape.NoFrame)
 
     def set_source_pixmap(self, pixmap: QPixmap) -> None:
         self._source_pixmap = pixmap
@@ -49,9 +49,18 @@ class SliceImageLabel(QLabel):
         self.setPixmap(scaled)
 
 
+@dataclass(frozen=True)
+class _PlaneSpec:
+    title: str
+    fixed_group: str
+    row_group: str
+    col_group: str
+
+
 class VolumeViewer(ViewerTab):
     def __init__(self) -> None:
         super().__init__(title="MRI Viewer")
+        self.hide_header()
         self._reset_button.setToolTip("Center slices")
         self._image: Optional[Image] = None
         self._image_name: Optional[str] = None
@@ -62,6 +71,22 @@ class VolumeViewer(ViewerTab):
         self._slice_views: list[SliceImageLabel] = []
         self._slice_names = ("Axial", "Coronal", "Sagittal")
         self._updating_controls = False
+        self._registration_request_handler: Callable[[str | None], None] | None = None
+        self._axis_mapping: dict[str, object] = {}
+        self._slider_group_order = ("lr", "ap", "si")
+        self._slider_prefix = {
+            "lr": "L-R",
+            "ap": "P-A",
+            "si": "I-S",
+        }
+        self._plane_specs = (
+            _PlaneSpec(title="Axial", fixed_group="si", row_group="ap", col_group="lr"),
+            _PlaneSpec(title="Coronal", fixed_group="ap", row_group="si", col_group="lr"),
+            _PlaneSpec(title="Sagittal", fixed_group="lr", row_group="si", col_group="ap"),
+        )
+
+        self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.customContextMenuRequested.connect(lambda position: self._show_context_menu(self, position))
 
         plotter_item = self._content_layout.takeAt(0)
         if plotter_item is not None and plotter_item.widget() is not None:
@@ -100,10 +125,11 @@ class VolumeViewer(ViewerTab):
 
         for title in self._slice_names:
             pane = QWidget(self._slice_container)
+            pane.setObjectName("slicePane")
             pane_layout = QVBoxLayout(pane)
             pane_layout.setContentsMargins(8, 8, 8, 8)
             pane_layout.setSpacing(6)
-            pane.setStyleSheet("QWidget { background: #111827; border: 1px solid #374151; border-radius: 8px; }")
+            pane.setStyleSheet("QWidget#slicePane { background: #111827; border: 1px solid #374151; border-radius: 8px; }")
 
             pane_title = QLabel(title)
             pane_title.setObjectName("viewerSidebarTitle")
@@ -113,32 +139,51 @@ class VolumeViewer(ViewerTab):
             pane_layout.addWidget(slice_view, 1)
             self._slice_container_layout.addWidget(pane, 1)
 
+            slice_view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+            slice_view.customContextMenuRequested.connect(
+                lambda position, widget=slice_view: self._show_context_menu(widget, position)
+            )
+
             self._slice_titles.append(pane_title)
             self._slice_views.append(slice_view)
+
+    def set_registration_request_handler(self, handler: Callable[[str | None], None] | None) -> None:
+        self._registration_request_handler = handler
+
+    def _show_context_menu(self, widget: QWidget, position) -> None:
+        if self._image_name is None or self._registration_request_handler is None:
+            return
+
+        menu = QMenu(self)
+        menu.addAction(
+            "Register to...",
+            lambda: self._registration_request_handler(self._image_name),
+        )
+        global_position = widget.mapToGlobal(position)
+        menu.exec(global_position)
 
     def load_image(self, image_name: str, image: Image, session: Session | None = None) -> None:
         self.clear_scene()
         self._image = image
         self._image_name = image_name
         self._session = session
+        self._axis_mapping = anatomical_axis_info(image)
 
         center = tuple((float(size) - 1.0) / 2.0 for size in image.shape)
-        for axis, slider in enumerate(self._slice_sliders):
-            self._set_slider_range(slider, 0, image.shape[axis] - 1)
+        for slider_index, slider in enumerate(self._slice_sliders):
+            group = self._slider_group_order[slider_index]
+            voxel_axis = self._axis_mapping[group].voxel_axis
+            self._set_slider_range(slider, 0, image.shape[voxel_axis] - 1)
 
-        self.set_title(f"MRI: {image_name}")
+        self.set_title("")
 
         voxel_spacing = voxel_size(image)
-        intensity_min = float(np.min(image.data))
-        intensity_max = float(np.max(image.data))
         self.set_metadata([
             ("Image", image_name),
             ("Type", "MRI Slice Viewer"),
             ("Dimensions", f"{image.shape[0]} × {image.shape[1]} × {image.shape[2]}"),
             ("Voxel size", f"{voxel_spacing[0]:0.3f} × {voxel_spacing[1]:0.3f} × {voxel_spacing[2]:0.3f} mm"),
             ("Orientation", image_orientation(image)),
-            ("Data type", str(image.data.dtype)),
-            ("Intensity range", f"{intensity_min:0.3f} → {intensity_max:0.3f}"),
             ("Frame", image.frame.name),
             ("Display", "Axial / Coronal / Sagittal slices"),
         ])
@@ -164,8 +209,13 @@ class VolumeViewer(ViewerTab):
         if self._image is None or self._updating_controls:
             return
 
-        x_index, y_index, z_index = [slider.value() for slider in self._slice_sliders]
-        self._apply_cursor((x_index, y_index, z_index))
+        indices = [0, 0, 0]
+        for slider_index, slider in enumerate(self._slice_sliders):
+            group = self._slider_group_order[slider_index]
+            voxel_axis = self._axis_mapping[group].voxel_axis
+            indices[voxel_axis] = slider.value()
+
+        self._apply_cursor((indices[0], indices[1], indices[2]))
 
     def _set_slider_range(self, slider: QSlider, minimum: int, maximum: int) -> None:
         slider.blockSignals(True)
@@ -202,9 +252,14 @@ class VolumeViewer(ViewerTab):
             return
 
         self._updating_controls = True
-        for axis, slider in enumerate(self._slice_sliders):
-            slider.setValue(indices[axis])
-            self._slice_labels[axis].setText(f"{('XYZ'[axis])} slice: {indices[axis]}")
+        for slider_index, slider in enumerate(self._slice_sliders):
+            group = self._slider_group_order[slider_index]
+            voxel_axis = self._axis_mapping[group].voxel_axis
+            slider_value = indices[voxel_axis]
+            slider.setValue(slider_value)
+            self._slice_labels[slider_index].setText(
+                f"{self._slider_prefix[group]} slice: {slider_value}"
+            )
         self._updating_controls = False
 
         world = voxel_to_world(self._image, tuple(float(value) for value in indices))
@@ -230,19 +285,96 @@ class VolumeViewer(ViewerTab):
         if self._image is None:
             return
 
-        slice_specs = (
-            (2, indices[2], (indices[0], indices[1]), f"Axial (z = {indices[2]})"),
-            (1, indices[1], (indices[0], indices[2]), f"Coronal (y = {indices[1]})"),
-            (0, indices[0], (indices[1], indices[2]), f"Sagittal (x = {indices[0]})"),
-        )
         point_items = self._matching_points_in_image_frame()
-        for pane_index, (axis, slice_index, crosshair, title) in enumerate(slice_specs):
+        for pane_index, spec in enumerate(self._plane_specs):
+            fixed = self._axis_mapping[spec.fixed_group]
+            row = self._axis_mapping[spec.row_group]
+            col = self._axis_mapping[spec.col_group]
+
+            slice_index = indices[fixed.voxel_axis]
+            title = f"{spec.title} ({self._slider_prefix[spec.fixed_group]} = {slice_index})"
             self._slice_titles[pane_index].setText(title)
-            slice_data = orthogonal_slice_data(self._image, axis, slice_index)
+
+            slice_data = self._extract_oriented_slice(
+                fixed_axis=fixed.voxel_axis,
+                slice_index=slice_index,
+                row_axis=row.voxel_axis,
+                col_axis=col.voxel_axis,
+                row_sign=row.sign,
+                col_sign=col.sign,
+            )
+            crosshair = self._voxel_to_plane_pixel(
+                indices,
+                row_axis=row.voxel_axis,
+                col_axis=col.voxel_axis,
+                row_sign=row.sign,
+                col_sign=col.sign,
+            )
+
             pixmap = self._slice_to_pixmap(slice_data, crosshair)
             if point_items:
-                self._draw_points_on_slice(pixmap, axis, slice_index, point_items)
+                self._draw_points_on_slice(
+                    pixmap,
+                    fixed_axis=fixed.voxel_axis,
+                    slice_index=slice_index,
+                    row_axis=row.voxel_axis,
+                    col_axis=col.voxel_axis,
+                    row_sign=row.sign,
+                    col_sign=col.sign,
+                    point_items=point_items,
+                )
             self._slice_views[pane_index].set_source_pixmap(pixmap)
+
+    def _extract_oriented_slice(
+        self,
+        fixed_axis: int,
+        slice_index: int,
+        row_axis: int,
+        col_axis: int,
+        row_sign: int,
+        col_sign: int,
+    ) -> np.ndarray:
+        assert self._image is not None
+
+        raw_slice = np.take(self._image.data, slice_index, axis=fixed_axis)
+        remaining_axes = [axis for axis in (0, 1, 2) if axis != fixed_axis]
+        raw_axis_index = {
+            axis: axis_index
+            for axis_index, axis in enumerate(remaining_axes)
+        }
+
+        oriented = np.moveaxis(
+            raw_slice,
+            [raw_axis_index[row_axis], raw_axis_index[col_axis]],
+            [0, 1],
+        )
+
+        if row_sign > 0:
+            oriented = np.flip(oriented, axis=0)
+        if col_sign < 0:
+            oriented = np.flip(oriented, axis=1)
+
+        return np.asarray(oriented)
+
+    def _voxel_to_plane_pixel(
+        self,
+        indices: tuple[int, int, int],
+        row_axis: int,
+        col_axis: int,
+        row_sign: int,
+        col_sign: int,
+    ) -> tuple[int, int]:
+        assert self._image is not None
+
+        row_index = int(indices[row_axis])
+        col_index = int(indices[col_axis])
+
+        if row_sign > 0:
+            row_index = (self._image.shape[row_axis] - 1) - row_index
+        if col_sign < 0:
+            col_index = (self._image.shape[col_axis] - 1) - col_index
+
+        return col_index, row_index
 
     def _matching_points_in_image_frame(self) -> list[tuple[str, object]]:
         if self._image is None or self._session is None:
@@ -258,8 +390,12 @@ class VolumeViewer(ViewerTab):
     def _draw_points_on_slice(
         self,
         pixmap: QPixmap,
-        axis: int,
+        fixed_axis: int,
         slice_index: int,
+        row_axis: int,
+        col_axis: int,
+        row_sign: int,
+        col_sign: int,
         point_items: list[tuple[str, object]],
     ) -> None:
         if self._image is None:
@@ -274,15 +410,21 @@ class VolumeViewer(ViewerTab):
             except Exception:
                 continue
 
-            if abs(float(voxel_coords[axis]) - float(slice_index)) > 0.5:
+            if abs(float(voxel_coords[fixed_axis]) - float(slice_index)) > 0.5:
                 continue
 
-            if axis == 2:
-                x_pos, y_pos = float(voxel_coords[0]), float(voxel_coords[1])
-            elif axis == 1:
-                x_pos, y_pos = float(voxel_coords[0]), float(voxel_coords[2])
-            else:
-                x_pos, y_pos = float(voxel_coords[1]), float(voxel_coords[2])
+            voxel_index = (
+                int(round(float(voxel_coords[0]))),
+                int(round(float(voxel_coords[1]))),
+                int(round(float(voxel_coords[2]))),
+            )
+            x_pos, y_pos = self._voxel_to_plane_pixel(
+                voxel_index,
+                row_axis=row_axis,
+                col_axis=col_axis,
+                row_sign=row_sign,
+                col_sign=col_sign,
+            )
 
             x_int = int(round(x_pos))
             y_int = int(round(y_pos))
@@ -299,7 +441,7 @@ class VolumeViewer(ViewerTab):
         painter.end()
 
     def _slice_to_pixmap(self, slice_data: np.ndarray, crosshair: tuple[int, int]) -> QPixmap:
-        data = np.asarray(slice_data, dtype=float).T
+        data = np.asarray(slice_data, dtype=float)
         finite = np.isfinite(data)
         if not finite.any():
             scaled = np.zeros_like(data, dtype=np.uint8)
@@ -354,8 +496,9 @@ class VolumeViewer(ViewerTab):
     def clear_scene(self) -> None:
         self._image = None
         self._image_name = None
+        self._axis_mapping = {}
         for axis, label in enumerate(self._slice_labels):
-            label.setText(f"{('XYZ'[axis])}: -")
+            label.setText(f"{self._slider_prefix[self._slider_group_order[axis]]}: -")
         for axis, title in enumerate(self._slice_titles):
             title.setText(self._slice_names[axis])
         for view in self._slice_views:

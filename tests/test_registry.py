@@ -7,10 +7,12 @@ import pytest
 
 from cli.main import _bootstrap_session, build_command_registry
 from core.frames import CoordinateFrame
+from core.image import Image
 from core.point import Point
 from core.session import Session
 from core.transform import Transform
 from registry.command_registry import CommandExecutionError
+from core.registration import RegistrationReport
 
 
 @pytest.fixture
@@ -231,8 +233,53 @@ def test_help_command(session, registry):
     assert "point.add" in result.message
     assert "point.list" in result.message
     assert "transform" in result.message
+    assert "register.rigid" in result.message
+    assert "register.affine" in result.message
     assert "help" in result.message
     assert "session.summary" in result.message
+
+
+def test_register_affine_command_stores_transform(session, registry, monkeypatch):
+    """Registry: register.affine stores a named transform and report."""
+    moving = Image(np.ones((2, 2, 2), dtype=float), np.eye(4), session.get_frame("head"))
+    reference = Image(np.ones((2, 2, 2), dtype=float) * 2.0, np.eye(4), session.get_frame("mri"))
+    session.add_image("moving", moving)
+    session.add_image("reference", reference)
+
+    def fake_register_images(moving_image, reference_image, mode, quality):
+        assert moving_image is moving
+        assert reference_image is reference
+        assert mode == "affine"
+        assert quality == "accurate"
+        return (
+            Transform(moving.frame, reference.frame, np.eye(4)),
+            RegistrationReport(
+                mode=mode,
+                quality=quality,
+                iterations=52,
+                similarity=0.94,
+                translation_mm=8.2,
+                rotation_deg=3.4,
+            ),
+        )
+
+    monkeypatch.setattr("registry.command_registry.register_images", fake_register_images)
+
+    result = registry.execute(
+        session,
+        "register.affine",
+        ["moving", "reference"],
+        {"quality": "accurate", "name": "registered_transform", "report": True},
+    )
+
+    assert "Registered affine transform 'registered_transform'" in result.message
+    assert "Iterations: 52" in result.message
+    assert "Similarity: 0.94" in result.message
+    assert session.transforms.get_transform("registered_transform").source.name == "head"
+    assert session.transforms.get_transform("registered_transform").target.name == "mri"
+    assert result.data is not None
+    assert result.data["registration"]["iterations"] == 52
+    assert result.data["report"].startswith("Registered affine transform 'registered_transform'")
 
 
 def test_transform_with_numeric_kwargs(session, registry):

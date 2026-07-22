@@ -1,4 +1,4 @@
-"""Bottom-panel inspector for the current TMSCoords session."""
+"""Bottom-panel inspector for the current TMSLabs session."""
 
 from __future__ import annotations
 
@@ -26,6 +26,7 @@ class SessionInspectorWidget(QWidget):
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
+        self.setObjectName("sessionInspector")
 
         # Header row with title on the left and status on the right
         from PySide6.QtWidgets import QHBoxLayout
@@ -61,6 +62,8 @@ class SessionInspectorWidget(QWidget):
         self.transforms_table = self._make_table(["Name", "Source", "Target", "Matrix"])
         self.surfaces_table = self._make_table(["Name", "Frame", "Vertices", "Faces"])
         self.frames_table = self._make_table(["Name", "Axes", "Units", "Description"])
+
+        self.images_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
 
         self.tabs.addTab(self.overview, "Overview")
         self.tabs.addTab(self.points_table, "Points")
@@ -224,5 +227,5 @@ class SessionInspectorWidget(QWidget):
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok)
         buttons.accepted.connect(dlg.accept)
         layout.addWidget(buttons)
-        dlg.setModal(False)
-        dlg.show()
+        dlg.setModal(True)
+        dlg.exec()

@@ -1,6 +1,10 @@
 ## Working notes for documentation
 
-This file is intentionally more detailed than the README. It is meant to be a staging area for future docs, reference material, and content that should not crowd the project landing page.
+This file is intentionally more detailed than the README. It is meant to be a staging area for future docs, reference material, and content that should not crowd the project landing page for TMSLabs.
+
+## Important architectural information
+
+Nibabel is used to canonise all mri images into RAS format
 
 ## Command reference
 

@@ -20,12 +20,14 @@ class ConsoleWidget(QWidget):
         command_registry: CommandRegistry,
         viewer_manager: ViewerManager | None = None,
         on_session_changed: Callable[[], None] | None = None,
+        on_status: Callable[[str, str | None, str], None] | None = None,
     ) -> None:
         super().__init__()
         self._session = session
         self._command_registry = command_registry
         self._viewer_manager = viewer_manager
         self._on_session_changed = on_session_changed
+        self._on_status = on_status
 
         layout = QVBoxLayout(self)
         self.output = QTextEdit()
@@ -67,6 +69,13 @@ class ConsoleWidget(QWidget):
             else:
                 for line in result.message.splitlines():
                     self._append(line)
+
+            if self._on_status is not None and result.data and result.data.get("report"):
+                self._on_status(
+                    result.message.splitlines()[0] if result.message else "Command complete",
+                    str(result.data["report"]),
+                    "info",
+                )
 
             if self._on_session_changed is not None:
                 self._on_session_changed()

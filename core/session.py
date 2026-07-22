@@ -116,3 +116,15 @@ class Session:
         from .import_service import import_image as service_import
 
         return service_import(self, path)
+
+    def import_surface(
+        self,
+        path: str,
+        frame_name: str | None = None,
+        surface_name: str | None = None,
+    ) -> tuple[Surface, str]:
+        """Import a cortical or BEM surface from file into the session."""
+
+        from .import_service import import_surface as service_import
+
+        return service_import(self, path, frame_name=frame_name, surface_name=surface_name)
