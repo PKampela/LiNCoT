@@ -9,7 +9,10 @@ import numpy as np
 import pyvista as pv
 from nibabel.orientations import aff2axcodes
 
+from core.frames import CoordinateFrame
 from core.image import Image
+from core.point import Point
+from core.point import Point
 from core.surface import Surface
 
 
@@ -78,6 +81,38 @@ def world_to_voxel(image: Image, world_coords: tuple[float, float, float]) -> tu
     voxel = affine_inv @ point
     return (float(voxel[0]), float(voxel[1]), float(voxel[2]))
 
+def point_to_voxel(image: Image, point: Point) -> np.ndarray:
+    """
+    Return voxel coordinates for a point expressed in the
+    coordinate frame associated with this image.
+    """
+
+    if point.frame.units == "voxel":
+        return np.asarray(point.coords, dtype=float)
+
+    if point.frame.units == "mm":
+        return np.asarray(world_to_voxel(image, tuple(point.coords)), dtype=float)
+
+    raise ValueError(
+        f"Unknown frame units '{point.frame.units}'"
+    )
+
+def voxel_to_point(
+    image: Image,
+    voxel: np.ndarray,
+    frame: CoordinateFrame,
+) -> Point:
+
+    if frame.units == "voxel":
+        coords = voxel
+
+    elif frame.units == "mm":
+        coords = voxel_to_world(image, tuple(voxel))
+
+    else:
+        raise ValueError(f"Unknown frame units '{frame.units}'")
+
+    return Point(np.asarray(coords), frame)
 
 def image_orientation(image: Image) -> str:
     """Return the three-letter orientation code for an image affine."""

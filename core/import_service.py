@@ -10,10 +10,17 @@ import re
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from mne import surface
 import numpy as np
+
+from core.asset import AssetMetadata
 
 from .frames import CoordinateFrame
 from .transform import Transform
+from .image import Image
+from .point import Point
+from .session import Session
+from .surface import Surface
 
 if TYPE_CHECKING:
     from .image import Image
@@ -35,40 +42,40 @@ class UnsupportedFormatError(ImportError):
 _SURFACE_EXTENSIONS = {"pial", "white", "sphere", "surf", "inflated", "orig", "smoothwm"}
 
 
-def get_file_extension(path: str) -> str:
+def get_file_extension(path: Path) -> str:
     """Extract a normalized file extension without leading dot.
 
     Handles double extensions such as .nii.gz.
     """
-    name = Path(path).name.lower()
+    name = path.name.lower()
     if name.endswith(".nii.gz"):
         return "nii.gz"
-    return Path(path).suffix.lstrip(".").lower()
+    return path.suffix.lstrip(".").lower()
 
 
-def _strip_known_extensions(path: str) -> str:
+def _strip_known_extensions(path: Path) -> str:
     """Return a stable stem for image and transform files."""
 
-    name = Path(path).name
+    name = path.name
     lower_name = name.lower()
     if lower_name.endswith(".nii.gz"):
         return name[:-7]
     if lower_name.endswith(".nii"):
         return name[:-4]
-    return Path(path).stem
+    return path.stem
 
 
-def _infer_surface_name(path: str) -> str:
-    name = Path(path).name
-    suffix = Path(path).suffix.lower().lstrip(".")
+def _infer_surface_name(path: Path) -> str:
+    name = path.name
+    suffix = path.suffix.lower().lstrip(".")
     if suffix == "surf":
-        return Path(path).stem
+        return path.stem
     return name.replace(".", "_")
 
 
-def _infer_surface_frame_name(path: str) -> str:
-    suffix = Path(path).suffix.lower().lstrip(".")
-    stem = Path(path).stem.lower()
+def _infer_surface_frame_name(path: Path) -> str:
+    suffix = path.suffix.lower().lstrip(".")
+    stem = path.stem.lower()
     if suffix == "surf" and any(token in stem for token in ("skin", "skull")):
         return "head"
     return "surface_ras"
@@ -82,15 +89,27 @@ def _unique_name(preferred: str, existing: list[str]) -> str:
         index += 1
     return f"{preferred}_{index}"
 
+def create_asset_metadata(
+    path: Path,
+    *,
+    linked: bool = True,
+    imported_by: str = "user",
+) -> AssetMetadata:
+    return AssetMetadata(
+        source_path=path.resolve(),
+        linked=linked,
+        imported_by=imported_by,
+    )
 
-def _extract_xfm_payload(path: str) -> tuple[list[str], np.ndarray]:
+
+def _extract_xfm_payload(path: Path) -> tuple[list[str], np.ndarray]:
     """Extract metadata lines and the affine matrix from an .xfm file.
 
     The file format is loosely structured: top metadata/comment lines are preserved
     for display, then the Linear_Transform block is parsed into a 4x4 affine.
     """
 
-    lines = Path(path).read_text(encoding="utf-8").splitlines()
+    lines = path.read_text(encoding="utf-8").splitlines()
     metadata_lines: list[str] = []
     matrix_rows: list[list[float]] = []
     in_linear_block = False
@@ -123,20 +142,20 @@ def _extract_xfm_payload(path: str) -> tuple[list[str], np.ndarray]:
     row_lengths = {len(row) for row in matrix_rows}
     if row_lengths - {4}:
         raise ImportError(
-            f"Invalid .xfm transform rows in {Path(path).name}: expected rows of 4 values"
+            f"Invalid .xfm transform rows in {path.name}: expected rows of 4 values"
         )
 
     if len(matrix_rows) == 3:
         matrix_rows.append([0.0, 0.0, 0.0, 1.0])
     elif len(matrix_rows) != 4:
         raise ImportError(
-            f"Invalid .xfm transform in {Path(path).name}: expected 3 or 4 rows, got {len(matrix_rows)}"
+            f"Invalid .xfm transform in {path.name}: expected 3 or 4 rows, got {len(matrix_rows)}"
         )
 
     matrix = np.asarray(matrix_rows, dtype=float)
     if matrix.shape != (4, 4):
         raise ImportError(
-            f"Invalid .xfm transform in {Path(path).name}: expected a 4x4 matrix, got {matrix.shape}"
+            f"Invalid .xfm transform in {path.name}: expected a 4x4 matrix, got {matrix.shape}"
         )
 
     return metadata_lines, matrix
@@ -144,7 +163,7 @@ def _extract_xfm_payload(path: str) -> tuple[list[str], np.ndarray]:
 
 def import_transform(
     session: Session,
-    path: str,
+    path: Path,
     source_frame_name: str | None = None,
     target_frame_name: str | None = None,
 ) -> tuple[Transform, str]:
@@ -164,8 +183,7 @@ def import_transform(
         UnsupportedFormatError: If file format is not supported
         ImportError: If import or validation fails
     """
-    path_obj = Path(path)
-    if not path_obj.exists():
+    if not path.exists():
         raise ImportError(f"File not found: {path}")
 
     ext = get_file_extension(path)
@@ -184,15 +202,32 @@ def import_transform(
             f"Supported formats: .fif, .xfm"
         )
 
+def import_multiple_transforms(
+    session: Session,
+    paths: list[Path],
+    source_frame_name: str | None = None,
+    target_frame_name: str | None = None,
+) -> list[tuple[Transform, str]]:
+    """Import multiple transforms from files into the session."""
+    transforms = []
+    for path in paths:
+        transform, info = import_transform(
+            session,
+            path,
+            source_frame_name=source_frame_name,
+            target_frame_name=target_frame_name
+        )
+        transforms.append((transform, info))
+    return transforms
 
-def import_image(session: Session, path: str) -> tuple["Image", str]:
+
+def import_image(session: Session, path: Path) -> tuple["Image", str]:
     """Import an MRI image into the session.
 
     Routes NIfTI files to the NiBabel backend, creates subject-specific
     coordinate frames and voxel->MRI transforms, and registers the image.
     """
-    path_obj = Path(path)
-    if not path_obj.exists():
+    if not path.exists():
         raise ImportError(f"File not found: {path}")
 
     ext = get_file_extension(path)
@@ -203,17 +238,24 @@ def import_image(session: Session, path: str) -> tuple["Image", str]:
         f"Supported formats: .nii, .nii.gz"
     )
 
+def import_multiple_images(session: Session, paths: list[Path]) -> list[tuple["Image", str]]:
+    """Import multiple MRI images from files into the session."""
+    images = []
+    for path in paths:
+        image, info = import_image(session, path)
+        images.append((image, info))
+    return images
+
 
 def import_surface(
     session: Session,
-    path: str,
+    path: Path,
     frame_name: str | None = None,
     surface_name: str | None = None,
-) -> tuple["Surface", str]:
+) -> tuple["Surface", str, str]:
     """Import a triangular surface mesh into the session."""
 
-    path_obj = Path(path)
-    if not path_obj.exists():
+    if not path.exists():
         raise ImportError(f"File not found: {path}")
 
     ext = get_file_extension(path)
@@ -239,23 +281,31 @@ def import_surface(
             name=inferred_frame_name,
             axes=("R", "A", "S"),
             units="mm",
-            description=f"Imported surface frame from {Path(path).name}",
+            description=f"Imported surface frame from {path.name}",
         )
-        session.frames.register_frame(frame)
+        session.frames.add_frame(frame)
         frame_created = True
 
     try:
-        surface = load_surface_geometry(path, frame)
+        vertices, faces = load_surface_geometry(path)
+        surface = Surface(
+            vertices=vertices,
+            faces=faces,
+            frame=frame,
+            asset=create_asset_metadata(path)
+        )
     except Exception as exc:
         raise ImportError(f"Failed to load surface: {exc}") from exc
 
-    register_name = _unique_name(inferred_name, session.surfaces.list_surfaces())
+    
+
+    register_name = _unique_name(inferred_name, session.surfaces.names_all())
     session.add_surface(register_name, surface)
 
     info_lines = [
         f"Imported surface: {register_name}",
         f"  Frame: {surface.frame.name}",
-        f"  File: {Path(path).name}",
+        f"  File: {path.name}",
         f"  Vertices: {surface.vertices.shape[0]}",
         f"  Faces: {surface.faces.shape[0]}",
     ]
@@ -266,10 +316,30 @@ def import_surface(
     if frame_name is None:
         info_lines.append(f"  Inferred frame from file: {inferred_frame_name}")
 
-    return surface, "\n".join(info_lines)
+    return surface, register_name, "\n".join(info_lines)
+
+def import_multiple_surfaces(
+    session: Session,
+    paths: list[Path],
+    frame_names: list[str] | None = None,
+    surface_names: list[str] | None = None,
+) -> list[tuple["Surface", str, str]]:
+    """Import multiple triangular surface meshes into the session."""
+    surfaces = []
+    for i, path in enumerate(paths):
+        surface_name = surface_names[i] if surface_names and i < len(surface_names) else None
+        frame_name = frame_names[i] if frame_names and i < len(frame_names) else None
+        surface, register_name, info = import_surface(
+            session,
+            path,
+            frame_name=frame_name,
+            surface_name=surface_name
+        )
+        surfaces.append((surface, register_name, info))
+    return surfaces
 
 
-def _import_transform_fif(session: Session, path: str) -> tuple[Transform, str]:
+def _import_transform_fif(session: Session, path: Path) -> tuple[Transform, str]:
     """Import MNE .fif transform file.
 
     Args:
@@ -288,7 +358,8 @@ def _import_transform_fif(session: Session, path: str) -> tuple[Transform, str]:
         raise ImportError(f"MNE backend not available: {exc}") from exc
 
     try:
-        transform, source_frame_name, target_frame_name = load_transform_with_frame_mapping(path, session.frames)
+        source_frame, target_frame, matrix, source_frame_name, target_frame_name = load_transform_with_frame_mapping(path, session.frames)
+        transform = Transform(source=source_frame, target=target_frame, matrix=matrix, asset=create_asset_metadata(path))
     except Exception as exc:
         raise ImportError(f"Failed to load MNE transform: {exc}") from exc
 
@@ -296,13 +367,13 @@ def _import_transform_fif(session: Session, path: str) -> tuple[Transform, str]:
     _validate_transform(transform)
 
     # Generate a name for the transform
-    file_stem = Path(path).stem
+    file_stem = path.stem
     transform_name = f"import_{file_stem}"
 
     # Check for name collision
-    if transform_name in session.transforms.list_transforms():
+    if transform_name in session.transforms.names():
         i = 1
-        while f"{transform_name}_{i}" in session.transforms.list_transforms():
+        while f"{transform_name}_{i}" in session.transforms.names():
             i += 1
         transform_name = f"{transform_name}_{i}"
 
@@ -313,21 +384,20 @@ def _import_transform_fif(session: Session, path: str) -> tuple[Transform, str]:
         f"Imported transform: {transform_name}\n"
         f"  Source: {source_frame_name}\n"
         f"  Target: {target_frame_name}\n"
-        f"  File: {Path(path).name}"
+        f"  File: {path.name}"
     )
 
     return transform, info_msg
 
 
-def preview_xfm_transform(path: str) -> tuple[list[str], np.ndarray]:
+def preview_xfm_transform(path: Path) -> tuple[list[str], np.ndarray]:
     """Read an .xfm file without importing it, for GUI preview/prompting."""
 
-    path_obj = Path(path)
-    if not path_obj.exists():
+    if not path.exists():
         raise ImportError(f"File not found: {path}")
 
     if get_file_extension(path) != "xfm":
-        raise UnsupportedFormatError(f"Unsupported transform format preview: {Path(path).suffix}")
+        raise UnsupportedFormatError(f"Unsupported transform format preview: {path.suffix}")
 
     return _extract_xfm_payload(path)
 
@@ -346,7 +416,7 @@ def format_xfm_preview(metadata_lines: list[str], matrix: np.ndarray) -> str:
 
 def _import_transform_xfm(
     session: Session,
-    path: str,
+    path: Path,
     source_frame_name: str,
     target_frame_name: str,
 ) -> tuple[Transform, str]:
@@ -370,17 +440,17 @@ def _import_transform_xfm(
     source_frame, source_created = _get_or_create_frame(source_frame_name, "source")
     target_frame, target_created = _get_or_create_frame(target_frame_name, "target")
 
-    transform = Transform(source=source_frame, target=target_frame, matrix=matrix)
+    transform = Transform(source=source_frame, target=target_frame, matrix=matrix, asset=create_asset_metadata(path))
     _validate_transform(transform)
 
-    transform_name = _unique_name(f"import_{Path(path).stem}", session.transforms.list_transforms())
+    transform_name = _unique_name(f"import_{path.stem}", session.transforms.names())
     session.add_transform(transform_name, transform)
 
     info_lines = [
         f"Imported transform: {transform_name}",
         f"  Source: {source_frame_name}",
         f"  Target: {target_frame_name}",
-        f"  File: {Path(path).name}",
+        f"  File: {path.name}",
     ]
     if source_created:
         info_lines.append(f"  Created source frame: {source_frame_name}")
@@ -395,7 +465,7 @@ def _import_transform_xfm(
     return transform, "\n".join(info_lines)
 
 
-def _import_nifti_image(session: Session, path: str) -> tuple["Image", str]:
+def _import_nifti_image(session: Session, path: Path) -> tuple["Image", str]:
     """Import a NIfTI MRI image with subject-specific frames and transforms."""
 
     try:
@@ -408,7 +478,7 @@ def _import_nifti_image(session: Session, path: str) -> tuple["Image", str]:
     voxel_frame_name = f"{image_name}_voxel"
     mri_frame_name = f"{image_name}_mri"
 
-    voxel_frame = session.frames.get_frame(voxel_frame_name) if voxel_frame_name in session.frames.list_frames() else None
+    voxel_frame = session.frames.get_frame(voxel_frame_name) if voxel_frame_name in session.frames.names() else None
     if voxel_frame is None:
         from .frames import CoordinateFrame
 
@@ -420,7 +490,7 @@ def _import_nifti_image(session: Session, path: str) -> tuple["Image", str]:
         )
         session.add_frame(voxel_frame)
 
-    mri_frame = session.frames.get_frame(mri_frame_name) if mri_frame_name in session.frames.list_frames() else None
+    mri_frame = session.frames.get_frame(mri_frame_name) if mri_frame_name in session.frames.names() else None
     if mri_frame is None:
         from .frames import CoordinateFrame
 
@@ -432,17 +502,30 @@ def _import_nifti_image(session: Session, path: str) -> tuple["Image", str]:
         )
         session.add_frame(mri_frame)
 
-    image = load_nifti_image(path, mri_frame)
+    data, affine = load_nifti_image(path)
+    image = Image(
+        data=data,
+        affine=affine,
+        voxel_frame=voxel_frame,
+        world_frame=mri_frame,
+        asset=create_asset_metadata(path)
+    )
+    if image.voxel_frame.units != "voxel":
+        raise ValueError("Image voxel frame must use voxel coordinates.")
+
+    if image.world_frame.units != "mm":
+        raise ValueError("Image world frame must use millimetres.")
+
     session.add_image(image_name, image)
 
     transform = voxel_to_world_transform(
         image,
-        voxel_frame,
-        mri_frame,
+        image.voxel_frame,
+        image.world_frame,
     )
     _validate_transform(transform)
 
-    forward_name = _unique_name(f"{image_name}_voxel_to_mri", session.transforms.list_transforms())
+    forward_name = _unique_name(f"{image_name}_voxel_to_mri", session.transforms.names())
     session.add_transform(forward_name, transform)
 
     try:
@@ -457,8 +540,8 @@ def _import_nifti_image(session: Session, path: str) -> tuple["Image", str]:
 
     info_msg = (
         f"Imported MRI image: {image_name}\n"
-        f"  File: {Path(path).name}\n"
-        f"  Frame: {mri_frame.name}\n"
+        f"  File: {path.name}\n"
+        f"  World frame: {mri_frame.name}\n"
         f"  Voxel frame: {voxel_frame.name}\n"
         f"  Dimensions: {image.shape[0]} x {image.shape[1]} x {image.shape[2]}\n"
         f"  Voxel size: {voxel_size[0]:0.3f} x {voxel_size[1]:0.3f} x {voxel_size[2]:0.3f} mm\n"
@@ -519,6 +602,10 @@ def _validate_transform(transform: Transform) -> None:
 
 __all__ = [
     "import_transform",
+    "import_surface",
+    "import_multiple_transforms",
+    "import_multiple_surfaces",
+    "import_multiple_images",
     "preview_xfm_transform",
     "import_image",
     "get_file_extension",

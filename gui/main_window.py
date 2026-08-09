@@ -5,8 +5,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QAction
+from PySide6.QtCore import QTimer, Qt
+from PySide6.QtGui import QAction, QCloseEvent
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from core.project_manager import ProjectManager
 from core.session import Session
 from core.import_service import format_xfm_preview, get_file_extension, preview_xfm_transform
 from gui.console_widget import ConsoleWidget
@@ -36,7 +37,7 @@ from registry.transform_registry import TransformRegistry
 
 
 class XfmImportDialog(QDialog):
-    def __init__(self, path: str, metadata_lines: list[str], matrix, parent: QWidget | None = None) -> None:
+    def __init__(self, path: Path, metadata_lines: list[str], matrix, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Import XFM Transform")
 
@@ -74,7 +75,7 @@ class XfmImportDialog(QDialog):
 
 
 class SurfaceImportDialog(QDialog):
-    def __init__(self, path: str, parent: QWidget | None = None) -> None:
+    def __init__(self, path: Path, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Import Surface")
 
@@ -91,7 +92,7 @@ class SurfaceImportDialog(QDialog):
         preview.setReadOnly(True)
         preview.setPlainText(
             "Import a FreeSurfer-style surface such as lh.pial, lh.white, lh.sphere, or outer_skin.surf.\n"
-            f"File: {Path(path).name}\n\n"
+            f"File: {path.name}\n\n"
             "If no name is provided, the loader will infer one from the filename.\n"
             "If no frame is provided, cortical surfaces default to surface_ras and scalp/skull .surf files default to head."
         )
@@ -119,6 +120,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self._session = session
         self._command_registry = command_registry
+        self._project_manager = ProjectManager()
 
         self.setWindowTitle("TMSLabs")
         self.resize(1400, 900)
@@ -126,8 +128,14 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._build_menus()
         self._connect_context_menus()
+
+        self._check_recovery()
         self._refresh_session()
         self._rebuild_object_menus()
+
+        self._autosave_timer = QTimer(self)
+        self._autosave_timer.timeout.connect(self._autosave)
+        self._autosave_timer.start(300_000)
 
     def _build_ui(self) -> None:
         central = QWidget()
@@ -200,11 +208,14 @@ class MainWindow(QMainWindow):
         self._file_menu.addAction(self._action("Import MRI Image...", self._import_mri_dialog))
         self._file_menu.addAction(self._action("Import Surface...", self._import_surface_dialog))
         self._file_menu.addAction(self._action("Import Transform...", self._import_transform_dialog))
-        self._file_menu.addAction(self._action("Load Transform Registry...", self._load_transform_registry_dialog))
-        self._file_menu.addAction(self._action("Save Transform Registry...", self._save_transform_registry_dialog))
-        self._file_menu.addAction(self._action("Save Session Report...", self._save_session_report_dialog))
         self._file_menu.addSeparator()
-        self._file_menu.addAction(self._action("Exit", self.close))
+        self._file_menu.addAction(self._action("New Workspace", self._new_workspace))
+        self._file_menu.addAction(self._action("Open Project...", self._open_project_dialog))
+        self._file_menu.addAction(self._action("Recent Projects", self._recent_projects))
+        self._file_menu.addAction(self._action("Save Project...", self._save_project_dialog))
+        self._file_menu.addAction(self._action("Save Project As...", self._save_project_as_dialog))
+        self._file_menu.addSeparator()
+        self._file_menu.addAction(self._action("Exit", self._exit_application))
 
         self._session_menu.addAction(self._action("Refresh Session", self._refresh_session))
         self._session_menu.addSeparator()
@@ -290,19 +301,246 @@ class MainWindow(QMainWindow):
     def _on_session_changed(self) -> None:
         self._refresh_session()
 
+    def _autosave(self) -> None:
+        if not self._session.project.is_dirty:
+            return
+
+        try:
+            self._project_manager.autosave(self._session)
+        except Exception as exc:
+            self._set_status(
+                "Autosave failed",
+                str(exc),
+                timeout=4000,
+                level="warning",
+            )
+
+    def _exit_application(self) -> None:
+        """Close the application after checking for unsaved work."""
+
+        self.close()
+
+
+    def closeEvent(self, event: QCloseEvent) -> None:
+        print("CLOSE EVENT: entered", flush=True)
+
+        print("CLOSE EVENT: checking unsaved state", flush=True)
+        if not self._confirm_discard_unsaved():
+            print("CLOSE EVENT: user cancelled", flush=True)
+            event.ignore()
+            return
+
+        print("CLOSE EVENT: confirmation complete", flush=True)
+
+        print("CLOSE EVENT: starting autosave", flush=True)
+        self._project_manager.autosave(self._session)
+        print("CLOSE EVENT: autosave complete", flush=True)
+
+        print("CLOSE EVENT: starting viewer shutdown", flush=True)
+        self.viewer_manager.close_all_tabs()
+        print("CLOSE EVENT: viewer shutdown complete", flush=True)
+
+        print("CLOSE EVENT: accepting event", flush=True)
+        event.accept()
+
+        print("CLOSE EVENT: finished", flush=True)
+
     def _import_mri_dialog(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(
+        paths, _ = QFileDialog.getOpenFileNames(
             self,
             "Import MRI Image",
             str(Path.cwd()),
             "NIfTI volumes (*.nii *.nii.gz);;All files (*.*)",
         )
-        if not path:
+        if not paths:
             return
 
-        self._import_mri_from_path(path)
+        for path in paths:
+            self._import_mri_from_path(Path(path))
 
-    def _import_mri_from_path(self, path: str) -> None:
+    def _new_workspace(self) -> None:
+
+        if not self._confirm_discard_unsaved():
+            return
+
+        self._session = Session.create_empty_session()
+
+        self.viewer_manager.close_all_tabs()
+
+        self._refresh_session()
+        self._rebuild_object_menus()
+
+        self._update_window_title()
+
+        self._set_status(
+            "Workspace created",
+            "Started a new workspace.",
+            timeout=4000,
+        )
+
+    def _confirm_discard_unsaved(self) -> bool:
+
+        if not self._session.project.is_dirty:
+            return True
+
+        box = QMessageBox(self)
+
+        box.setWindowTitle("Unsaved changes")
+
+        box.setText(
+            "This workspace contains unsaved changes."
+        )
+
+        box.setInformativeText(
+            "Do you want to save before continuing?"
+        )
+
+        box.setStandardButtons(
+            QMessageBox.StandardButton.Save
+            | QMessageBox.StandardButton.Discard
+            | QMessageBox.StandardButton.Cancel
+        )
+
+        box.setDefaultButton(
+            QMessageBox.StandardButton.Save
+        )
+
+        result = box.exec()
+
+        if result == QMessageBox.StandardButton.Save:
+            self._save_project_dialog()
+            return True
+        elif result == QMessageBox.StandardButton.Discard:
+            return True
+        else:
+            return False
+
+
+    def _recent_projects(self) -> None:
+        pass
+
+    def _open_project_dialog(self) -> None:
+        """Prompt the user for a project directory."""
+
+        directory = QFileDialog.getExistingDirectory(
+            self,
+            "Open Project",
+            str(Path.cwd()),
+        )
+
+        if not directory:
+            return
+
+        self._open_project(Path(directory))
+
+    def _open_project(self, project_path: Path) -> None:
+        """Load a project from disk."""
+
+        if not self._confirm_discard_unsaved():
+            return
+
+        try:
+            session = self._project_manager.load(project_path)
+        except Exception as exc:
+            self._set_status(
+                "Project load failed",
+                str(exc),
+                timeout=8000,
+                level="error",
+            )
+            return
+
+        self._session = session
+
+        try:
+            self.viewer_manager.close_all_tabs()
+        except Exception:
+            pass
+
+        self._refresh_session()
+        self._update_window_title()
+
+        if session.load_warnings:
+            QMessageBox.warning(
+                self,
+                "Project Loaded",
+                "The project loaded with warnings:\n\n"
+                + "\n".join(session.load_warnings),
+            )
+
+        self._set_status(
+            "Project loaded",
+            f"Opened '{session.project.name or project_path.name}'",
+            timeout=5000,
+            level="info",
+        )
+
+    def _save_project_dialog(self) -> None:
+        """Save the current project."""
+
+        project_path = self._session.project.project_path
+
+        if project_path is None:
+            self._save_project_as_dialog()
+            return
+
+        self._save_project(project_path)
+
+    def _save_project_as_dialog(self) -> None:
+        """Prompt the user for a project location."""
+
+        directory = QFileDialog.getExistingDirectory(
+            self,
+            "Save Project",
+            str(Path.cwd()),
+        )
+
+        if not directory:
+            return
+
+        self._save_project(Path(directory))
+
+    def _save_project(self, project_path: Path) -> None:
+        """Save the current session as a project."""
+
+        try:
+            self._project_manager.save(
+                self._session,
+                project_path,
+                bundle_assets=True,
+            )
+        except Exception as exc:
+            self._set_status(
+                "Project save failed",
+                str(exc),
+                timeout=8000,
+                level="error",
+            )
+            return
+
+        self._update_window_title()
+        self._project_manager.clear_recovery()
+
+        self._session.project.is_dirty = False
+
+        self._set_status(
+            "Project saved",
+            f"Saved '{self._session.project.name}'",
+            timeout=5000,
+            level="info",
+        )
+
+    def _update_window_title(self) -> None:
+        """Update the application title."""
+
+        project_name = self._session.project.name
+
+        if not project_name:
+            project_name = "Untitled Workspace"
+
+        self.setWindowTitle(f"TMSLabs - {project_name}")
+
+    def _import_mri_from_path(self, path: Path) -> None:
         try:
             _image, info_msg = self._session.import_image(path)
         except Exception as exc:
@@ -329,21 +567,21 @@ class MainWindow(QMainWindow):
         if not path:
             return
 
-        dialog = SurfaceImportDialog(path, self)
+        dialog = SurfaceImportDialog(Path(path), self)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
 
-        self._import_surface_from_path(path, surface_name=dialog.surface_name or None, frame_name=dialog.frame_name or None)
+        self._import_surface_from_path(Path(path), surface_name=dialog.surface_name or None, frame_name=dialog.frame_name or None)
 
-    def _import_surface_from_path(self, path: str, surface_name: str | None = None, frame_name: str | None = None) -> None:
+    def _import_surface_from_path(self, path: Path, surface_name: str | None = None, frame_name: str | None = None) -> None:
         try:
-            surface, info_msg = self._session.import_surface(path, frame_name=frame_name, surface_name=surface_name)
+            surface, name, info_msg = self._session.import_surface(path, frame_name=frame_name, surface_name=surface_name)
         except Exception as exc:
             self._set_status("Surface import failed", str(exc), timeout=8000, level="error")
             return
 
-        first_line = info_msg.splitlines()[0] if info_msg else "Imported surface: " + Path(path).stem
-        imported_name = first_line.split(":", 1)[-1].strip() if ":" in first_line else Path(path).stem
+        first_line = info_msg.splitlines()[0] if info_msg else "Imported surface: " + path.stem
+        imported_name = first_line.split(":", 1)[-1].strip() if ":" in first_line else path.stem
         try:
             self.viewer_manager.open_surface(imported_name)
         except Exception as exc:
@@ -352,60 +590,94 @@ class MainWindow(QMainWindow):
         self._refresh_session()
         self._set_status("Surface imported", info_msg, timeout=8000, level="info")
 
+    def _import_transform_xfm(
+        self,
+        path: Path,
+    ) -> None:
+
+        metadata_lines, matrix = preview_xfm_transform(path)
+
+        dialog = XfmImportDialog(
+            path,
+            metadata_lines,
+            matrix,
+            self,
+        )
+
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        source_frame_name = dialog.source_frame_name
+        target_frame_name = dialog.target_frame_name
+
+        if not source_frame_name or not target_frame_name:
+            QMessageBox.information(
+                self,
+                "Import XFM Transform",
+                "Please provide both source and target frames.",
+            )
+            return
+
+        transform, info_msg = self._session.import_transform(
+            path,
+            source_frame_name=source_frame_name,
+            target_frame_name=target_frame_name,
+        )
+
+        self._set_status(
+            "Transform imported",
+            info_msg,
+            timeout=8000,
+            level="info",
+        )
+
     def _import_transform_dialog(self) -> None:
-        """Open file dialog to import a transform."""
-        path, _ = QFileDialog.getOpenFileName(
+        paths, _ = QFileDialog.getOpenFileNames(
             self,
             "Import Transform",
             str(Path.cwd()),
             "Transform files (*.fif *.xfm);;MNE Transform (*.fif);;XFM Transform (*.xfm);;All files (*.*)",
         )
-        if not path:
+
+        if not paths:
             return
 
-        self._import_transform_from_path(path)
+        self._import_transforms_from_paths(
+            [Path(p) for p in paths]
+        )
 
-    def _import_transform_from_path(self, path: str) -> None:
-        """Import a transform from file into the session.
+    def _import_transforms_from_paths(
+        self,
+        paths: list[Path],
+    ) -> None:
 
-        Args:
-            path: Path to transform file
-        """
-        try:
-            ext = get_file_extension(path)
-            if ext == "xfm":
-                metadata_lines, matrix = preview_xfm_transform(path)
-                dialog = XfmImportDialog(path, metadata_lines, matrix, self)
-                if dialog.exec() != QDialog.DialogCode.Accepted:
-                    return
+        for path in paths:
 
-                source_frame_name = dialog.source_frame_name
-                target_frame_name = dialog.target_frame_name
-                if not source_frame_name or not target_frame_name:
-                    QMessageBox.information(
-                        self,
-                        "Import XFM Transform",
-                        "Please provide both source and target frames.",
+            try:
+                ext = get_file_extension(path)
+
+                if ext == "xfm":
+                    self._import_transform_xfm(path)
+
+                else:
+                    transform, info_msg = self._session.import_transform(path)
+
+                    self._set_status(
+                        "Transform imported",
+                        info_msg,
+                        timeout=8000,
+                        level="info",
                     )
-                    return
 
-                transform, info_msg = self._session.import_transform(
-                    path,
-                    source_frame_name=source_frame_name,
-                    target_frame_name=target_frame_name,
+            except Exception as exc:
+                self._set_status(
+                    "Transform import failed",
+                    str(exc),
+                    timeout=8000,
+                    level="error",
                 )
-            else:
-                transform, info_msg = self._session.import_transform(path)
-        except Exception as exc:
-            error_msg = str(exc)
-            # Show error in status bar; details available on click
-            self._set_status("Import failed", error_msg, timeout=8000, level="error")
-            return
 
-        # Update GUI
         self._refresh_session()
-        # Show concise success message in status bar; details available on click
-        self._set_status("Transform imported", info_msg, timeout=8000, level="info")
 
     def _open_registration_dialog(self, moving_image_name: str | None = None) -> None:
         image_names = self._session.list_images()
@@ -467,118 +739,8 @@ class MainWindow(QMainWindow):
         report = result.data.get("report") if result.data else result.message
         self._set_status("Registration complete", str(report), timeout=8000, level="info")
 
-    def _load_transform_registry_dialog(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Load Transform Registry",
-            str(Path.cwd()),
-            "JSON files (*.json);;All files (*.*)",
-        )
-        if not path:
-            return
-
-        try:
-            self._session.transforms = TransformRegistry.load(path, self._frame_mapping())
-        except Exception as exc:
-            QMessageBox.critical(self, "Load Transform Registry", str(exc))
-            return
-
-        self._refresh_session()
-        self.statusBar().showMessage(f"Loaded transform registry from {path}", 8000)
-
-    def _save_transform_registry_dialog(self) -> None:
-        if not self._session.transforms.list_transforms():
-            QMessageBox.information(self, "Save Transform Registry", "There are no transforms in the current session.")
-            return
-
-        path, _ = QFileDialog.getSaveFileName(
-            self,
-            "Save Transform Registry",
-            str(Path.cwd() / "transforms.json"),
-            "JSON files (*.json);;All files (*.*)",
-        )
-        if not path:
-            return
-
-        try:
-            self._session.transforms.save(path)
-        except Exception as exc:
-            QMessageBox.critical(self, "Save Transform Registry", str(exc))
-            return
-
-        self.statusBar().showMessage(f"Saved transform registry to {path}", 8000)
-
-    def _save_session_report_dialog(self) -> None:
-        path, _ = QFileDialog.getSaveFileName(
-            self,
-            "Save Session Report",
-            str(Path.cwd() / "session_report.json"),
-            "JSON files (*.json);;All files (*.*)",
-        )
-        if not path:
-            return
-
-        report = self._build_session_report()
-        try:
-            Path(path).write_text(json.dumps(report, indent=2), encoding="utf-8")
-        except Exception as exc:
-            QMessageBox.critical(self, "Save Session Report", str(exc))
-            return
-
-        self.statusBar().showMessage(f"Saved session report to {path}", 8000)
-
-    def _build_session_report(self) -> dict:
-        return {
-            "subject_id": self._session.subject_id,
-            "description": self._session.description,
-            "frames": [
-                {
-                    "name": name,
-                    "axes": list(self._session.frames.get_frame(name).axes),
-                    "units": self._session.frames.get_frame(name).units,
-                    "description": self._session.frames.get_frame(name).description,
-                }
-                for name in self._session.frames.list_frames()
-            ],
-            "points": [
-                {
-                    "name": name,
-                    "frame": self._session.get_point(name).frame.name,
-                    "coords": self._session.get_point(name).coords.tolist(),
-                }
-                for name in self._session.list_points()
-            ],
-            "images": [
-                {
-                    "name": name,
-                    "frame": self._session.get_image(name).frame.name,
-                    "shape": [int(value) for value in self._session.get_image(name).shape],
-                    "dtype": str(self._session.get_image(name).data.dtype),
-                }
-                for name in self._session.list_images()
-            ],
-            "transforms": [
-                {
-                    "name": name,
-                    "source": self._session.transforms.get_transform(name).source.name,
-                    "target": self._session.transforms.get_transform(name).target.name,
-                    "matrix": self._session.transforms.get_transform(name).matrix.tolist(),
-                }
-                for name in self._session.transforms.list_transforms()
-            ],
-            "surfaces": [
-                {
-                    "name": name,
-                    "frame": self._session.get_surface(name).frame.name,
-                    "vertices": int(self._session.get_surface(name).vertices.shape[0]),
-                    "faces": int(self._session.get_surface(name).faces.shape[0]),
-                }
-                for name in self._session.list_surfaces()
-            ],
-        }
-
     def _frame_mapping(self):
-        frames = {name: self._session.frames.get_frame(name) for name in self._session.frames.list_frames()}
+        frames = {name: self._session.frames.get_frame(name) for name in self._session.frames.names()}
         return frames
 
     def _open_volume_viewer(self, volume_name: str) -> None:
@@ -597,7 +759,9 @@ class MainWindow(QMainWindow):
         active_viewer = self.viewer_manager.active_viewer
         if active_viewer is None or not hasattr(active_viewer, "reset_camera"):
             return
-        active_viewer.reset_camera()
+        active_viewer.update()
+
+
 
     def _focus_console(self) -> None:
         self.console_widget.input.setFocus()
@@ -645,3 +809,45 @@ class MainWindow(QMainWindow):
 
     def _close_viewer_tab(self, index: int) -> None:
         self.viewer_manager.close_tab(index)
+
+    def _check_recovery(self) -> None:
+        """Check for autosaved recovery data on startup."""
+
+        if not self._project_manager.has_recovery():
+            return
+
+        recovery_path = self._project_manager.default_recovery_path()
+
+        result = QMessageBox.question(
+            self,
+            "Recover Workspace",
+            (
+                "A previous workspace was recovered after an unexpected shutdown.\n\n"
+                "Would you like to restore it?"
+            ),
+            QMessageBox.StandardButton.Yes
+            | QMessageBox.StandardButton.No,
+        )
+
+        if result == QMessageBox.StandardButton.Yes:
+            try:
+                self._session = self._project_manager.load(
+                    recovery_path
+                )
+
+                self._set_status(
+                    "Workspace recovered",
+                    "Recovered autosaved workspace",
+                    timeout=5000,
+                    level="info",
+                )
+
+            except Exception as exc:
+                QMessageBox.warning(
+                    self,
+                    "Recovery Failed",
+                    f"Could not recover workspace:\n\n{exc}",
+                )
+
+        else:
+            self._project_manager.clear_recovery()

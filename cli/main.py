@@ -13,12 +13,6 @@ from registry.command_registry import (
     register_default_commands,
 )
 
-
-def _bootstrap_session(base_session: Optional[Session] = None) -> Session:
-    session = base_session or Session(subject_id="default", description="Interactive TMSLabs session")
-    return session
-
-
 def build_command_registry() -> CommandRegistry:
     registry = CommandRegistry()
     register_default_commands(registry)
@@ -69,7 +63,7 @@ def run_interactive_cli(
 
 def main(argv: Optional[Sequence[str]] = None, session: Optional[Session] = None) -> int:
     """Main CLI entry point."""
-    runtime_session = _bootstrap_session(session)
+    runtime_session = Session.create_empty_session()
     
     # Interactive CLI is default
     return run_interactive_cli(runtime_session)

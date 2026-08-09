@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Mapping, Optional, Tuple
 
 import numpy as np
 from scipy.ndimage import affine_transform
+
+from core.asset import AssetMetadata
 
 from .frames import CoordinateFrame
 from .transform import Transform
@@ -16,25 +18,92 @@ from .transform import Transform
 class Image:
     """Represents a 2D/3D image with an affine and coordinate frame."""
 
-    data: np.ndarray
+    data: np.ndarray | None
     affine: np.ndarray
-    frame: CoordinateFrame
+    voxel_frame: CoordinateFrame
+    world_frame: CoordinateFrame
+    asset: AssetMetadata | None = None
+    shape_metadata: Tuple[int, ...] | None = None  # Optional shape metadata for images without data
 
     def __post_init__(self) -> None:
-        data_array = np.asarray(self.data)
-        if data_array.ndim not in (2, 3):
-            raise ValueError("data must be a 2D or 3D array")
-        affine_array = _normalize_affine(self.affine, data_array.ndim)
-        object.__setattr__(self, "data", data_array)
+        if self.data is not None:
+            data_array = np.asarray(self.data)
+
+            if data_array.ndim not in (2, 3):
+                raise ValueError("data must be a 2D or 3D array")
+
+            object.__setattr__(self, "data", data_array)
+
+        affine_array = _normalize_affine(
+            self.affine,
+            self.data.ndim if self.data is not None else 3,
+        )
+
         object.__setattr__(self, "affine", affine_array)
 
     @property
     def shape(self) -> Tuple[int, ...]:
-        return self.data.shape
+        if self.data is not None:
+            return self.data.shape
+        if self.shape_metadata is not None:
+            return self.shape_metadata
+        raise ValueError("Image has no shape information")
 
     @property
     def ndim(self) -> int:
-        return self.data.ndim
+        return self.data.ndim if self.data is not None else 3
+
+    def to_dict(self) -> dict:
+        """Convert image metadata to a dictionary representation."""
+        return {
+            "shape_metadata": list(self.shape),
+            "affine": self.affine.tolist(),
+            "voxel_frame": self.voxel_frame.name,
+            "world_frame": self.world_frame.name,
+            "asset": self.asset.to_dict() if self.asset else None,
+        }
+    
+    @classmethod
+    def from_dict(
+        cls,
+        data: dict,
+        frames: Mapping[str, CoordinateFrame],
+    ) -> "Image":
+        """Reconstruct image metadata without loading voxel data."""
+
+        voxel_frame_name = data["voxel_frame"]
+        world_frame_name = data["world_frame"]
+
+        try:
+            voxel_frame = frames[voxel_frame_name]
+        except KeyError as exc:
+            raise ValueError(
+                f"Image references unknown voxel frame "
+                f"'{voxel_frame_name}'"
+            ) from exc
+
+        try:
+            world_frame = frames[world_frame_name]
+        except KeyError as exc:
+            raise ValueError(
+                f"Image references unknown world frame "
+                f"'{world_frame_name}'"
+            ) from exc
+
+        asset = (
+            AssetMetadata.from_dict(data["asset"])
+            if data.get("asset")
+            else None
+        )
+
+        return cls(
+            data=None,
+            affine=np.asarray(data["affine"], dtype=float),
+            voxel_frame=voxel_frame,
+            world_frame=world_frame,
+            asset=asset,
+            shape_metadata=tuple(data["shape_metadata"]),
+        )
 
 
 def _normalize_affine(affine: np.ndarray, ndim: int) -> np.ndarray:
@@ -79,9 +148,9 @@ def transform_image(
         Target frame for the output image. Defaults to the transform target.
     """
 
-    if image.frame != transform.source:
+    if image.voxel_frame != transform.source:
         raise ValueError(
-            f"Image frame '{image.frame.name}' does not match transform source '{transform.source.name}'"
+            f"Image voxel frame '{image.voxel_frame.name}' does not match transform source '{transform.source.name}'"
         )
 
     if output_shape is None:
@@ -111,5 +180,6 @@ def transform_image(
     return Image(
         data=data,
         affine=target_affine,
-        frame=output_frame if output_frame is not None else transform.target,
+        voxel_frame=output_frame if output_frame is not None else transform.target,
+        world_frame=transform.target,
     )

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -11,14 +10,13 @@ from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Seque
 import numpy as np
 
 from core.import_service import import_image as import_mri_image
-from core.import_service import import_surface as import_surface_file
 from core.chain import TransformChain
-from core.frames import CoordinateFrame
 from core.registration import register_images, registration_report_lines
 from core.point import Point
+from core.transform import Transform
 from core.session import Session
-from registry.frame_registry import FrameRegistry
 from registry.transform_registry import TransformRegistry
+
 
 
 @dataclass(frozen=True)
@@ -115,7 +113,7 @@ def _cmd_point_list(session: Session, args: Sequence[str], kwargs: Dict[str, Any
 
 def _cmd_frame_list(session: Session, args: Sequence[str], kwargs: Dict[str, Any]) -> CommandResult:
     _expect_arg_count("frame.list", args, 0)
-    frames = session.frames.list_frames()
+    frames = session.frames.names()
     return CommandResult(
         message="Frames: " + (", ".join(frames) if frames else "none"),
         data={"frames": frames},
@@ -124,7 +122,7 @@ def _cmd_frame_list(session: Session, args: Sequence[str], kwargs: Dict[str, Any
 
 def _cmd_transform_list(session: Session, args: Sequence[str], kwargs: Dict[str, Any]) -> CommandResult:
     _expect_arg_count("transform.list", args, 0)
-    transforms = session.transforms.list_transforms()
+    transforms = session.transforms.names()
     return CommandResult(
         message="Transforms: " + (", ".join(transforms) if transforms else "none"),
         data={"transforms": transforms},
@@ -133,76 +131,79 @@ def _cmd_transform_list(session: Session, args: Sequence[str], kwargs: Dict[str,
 
 def _cmd_surface_list(session: Session, args: Sequence[str], kwargs: Dict[str, Any]) -> CommandResult:
     _expect_arg_count("surface.list", args, 0)
-    surfaces = session.surfaces.list_surfaces()
+    surfaces = session.surfaces.names_all()
     return CommandResult(
         message="Surfaces: " + (", ".join(surfaces) if surfaces else "none"),
         data={"surfaces": surfaces},
     )
 
 
-def _cmd_surface_import(session: Session, args: Sequence[str], kwargs: Dict[str, Any]) -> CommandResult:
-    _expect_arg_count("surface.import", args, 1)
-    path = args[0]
-    frame_name = kwargs.get("frame")
-    surface_name = kwargs.get("name")
+def _cmd_surface_import(
+    session: Session,
+    args: Sequence[str],
+    kwargs: Dict[str, Any],
+) -> CommandResult:
+
+    if not args:
+        raise CommandExecutionError(
+            "surface import requires at least one file"
+        )
+
+    paths = [Path(p) for p in args]
+
+    names = kwargs.get("name")
+    frames = kwargs.get("frame")
+
+    if isinstance(names, str):
+        names = [names]
+
+    if isinstance(frames, str):
+        frames = [frames]
+
+    if names and len(names) != len(paths):
+        raise CommandExecutionError(
+            f"Received {len(names)} names for {len(paths)} surfaces"
+        )
+
+    if frames and len(frames) != len(paths):
+        raise CommandExecutionError(
+            f"Received {len(frames)} frames for {len(paths)} surfaces"
+        )
 
     try:
-        surface, info_msg = import_surface_file(
-            session,
-            path,
-            frame_name=frame_name,
-            surface_name=surface_name,
+        results = session.import_surfaces(
+            paths,
+            frame_names=frames,
+            surface_names=names,
         )
+
     except Exception as exc:
-        raise CommandExecutionError(f"Failed to import surface: {exc}") from exc
+        raise CommandExecutionError(
+            f"Failed to import surfaces: {exc}"
+        ) from exc
 
-    first_line = info_msg.splitlines()[0] if info_msg else f"Imported surface: {Path(path).stem}"
-    resolved_name = first_line.split(":", 1)[-1].strip() if ":" in first_line else Path(path).stem
 
-    payload: Dict[str, object] = {
-        "surface": {
-            "name": resolved_name,
-            "path": path,
-            "frame": surface.frame.name,
-            "vertices": int(surface.vertices.shape[0]),
-            "faces": int(surface.faces.shape[0]),
-        }
+    payload = {
+        "surfaces": [
+            {
+                "name": registered_name,
+                "path": str(path),
+                "frame": surface.frame.name,
+                "vertices": int(surface.vertices.shape[0]),
+                "faces": int(surface.faces.shape[0]),
+            }
+            for (surface, registered_name, _), path
+            in zip(results, paths)
+        ]
     }
 
-    return CommandResult(
-        message=info_msg,
-        data=payload,
-        output_format="json" if kwargs.get("json") else "text",
+    message = "\n\n".join(
+        info
+        for _, _, info in results
     )
 
-
-def _cmd_surface_import(session: Session, args: Sequence[str], kwargs: Dict[str, Any]) -> CommandResult:
-    _expect_arg_count("surface.import", args, 1)
-    path = args[0]
-    frame_name = kwargs.get("frame")
-    surface_name = kwargs.get("name")
-    try:
-        surface, info_msg = import_surface_file(
-            session,
-            path,
-            frame_name=frame_name,
-            surface_name=surface_name,
-        )
-    except Exception as exc:
-        raise CommandExecutionError(f"Failed to import surface: {exc}") from exc
-
-    payload: Dict[str, object] = {
-        "surface": {
-            "name": surface_name or Path(path).name.replace(".", "_"),
-            "path": path,
-            "frame": surface.frame.name,
-            "vertices": int(surface.vertices.shape[0]),
-            "faces": int(surface.faces.shape[0]),
-        }
-    }
-
     return CommandResult(
-        message=info_msg,
+        message=message,
         data=payload,
         output_format="json" if kwargs.get("json") else "text",
     )
@@ -244,7 +245,8 @@ def _cmd_view_volume(session: Session, args: Sequence[str], kwargs: Dict[str, An
         "viewer": {"type": "volume", "name": image_name},
         "volume": {
             "name": image_name,
-            "frame": image.frame.name,
+            "voxel_frame": image.voxel_frame.name,
+            "world_frame": image.world_frame.name,
             "shape": tuple(int(value) for value in image.shape),
             "dtype": str(image.data.dtype),
         },
@@ -259,13 +261,13 @@ def _cmd_view_volume(session: Session, args: Sequence[str], kwargs: Dict[str, An
 def _cmd_session_summary(session: Session, args: Sequence[str], kwargs: Dict[str, Any]) -> CommandResult:
     _expect_arg_count("session.summary", args, 0)
     summary = {
-        "subject_id": session.subject_id,
-        "description": session.description,
-        "frames": session.frames.list_frames(),
+        "subject_id": session.subject.subject_id,
+        "description": session.project.description,
+        "frames": session.frames.names(),
         "points": session.list_points(),
         "images": session.list_images(),
-        "transforms": session.transforms.list_transforms(),
-        "surfaces": session.surfaces.list_surfaces(),
+        "transforms": session.transforms.names(),
+        "surfaces": session.surfaces.names_all(),
     }
     return CommandResult(
         message=(
@@ -277,7 +279,7 @@ def _cmd_session_summary(session: Session, args: Sequence[str], kwargs: Dict[str
 
 
 def _unique_transform_name(session: Session, preferred: str) -> str:
-    existing = session.transforms.list_transforms()
+    existing = session.transforms.names()
     if preferred not in existing:
         return preferred
     index = 1
@@ -403,7 +405,7 @@ def _build_transform_graph(
     registry: TransformRegistry,
 ) -> Dict[str, List[Tuple[str, str, bool]]]:
     graph: Dict[str, List[Tuple[str, str, bool]]] = {}
-    for name in registry.list_transforms():
+    for name in registry.names():
         transform = registry.get_transform(name)
         graph.setdefault(transform.source.name, []).append((transform.target.name, name, False))
         graph.setdefault(transform.target.name, []).append((transform.source.name, name, True))
@@ -499,7 +501,7 @@ def _resolve_transform_chain(
     explain_lines: List[str] = [
         f"Resolving transform from '{source}' to '{target}':",
         "",
-        f"- Found {len(registry.list_transforms())} registered transforms",
+        f"- Found {len(registry)} registered transforms",
     ]
 
     if transform_names:
@@ -527,7 +529,7 @@ def _resolve_transform_chain(
     paths = _find_shortest_paths(graph, source, target)
     if not paths:
         outgoing = graph.get(source, [])
-        available = ", ".join([name for _, name in outgoing])
+        available = ", ".join([name for _, name, _ in outgoing])
         explain_lines.extend(
             [
                 f"No valid transform chain found from '{source}' to '{target}'.",
@@ -555,302 +557,317 @@ def _resolve_transform_chain(
     return chain, steps, explain_lines
 
 
-def _cmd_transform(session: Session, args: Sequence[str], kwargs: Dict[str, Any]) -> CommandResult:
-    """Transform either an existing point or a raw coordinate triple.
-
-    Accepted forms:
-        transform <point> <target>
-        transform <point> <source> <target>
-        transform <source> <target> <x> <y> <z>
-    """
-    transform_registry = session.transforms
-    if not transform_registry.list_transforms():
-        raise CommandExecutionError(
-            "No transforms are registered in this session. Import a transform or MRI volume first."
-        )
-
-    chain_spec = kwargs.get("chain")
-    transform_names = None
-    if chain_spec:
-        transform_names = chain_spec if isinstance(chain_spec, list) else [chain_spec]
-
-    if len(args) in {2, 3}:
-        point_name = args[0]
-        if len(args) == 2:
-            target_frame = args[1]
-            try:
-                point = session.get_point(point_name)
-            except KeyError as exc:
-                raise CommandExecutionError(f"Unknown point: {point_name}") from exc
-            source_frame = point.frame.name
-        else:
-            source_frame, target_frame = args[1], args[2]
-            try:
-                point = session.get_point(point_name)
-            except KeyError as exc:
-                raise CommandExecutionError(f"Unknown point: {point_name}") from exc
-            if point.frame.name != source_frame:
-                raise CommandExecutionError(
-                    f"Point '{point_name}' is in frame '{point.frame.name}', not '{source_frame}'"
-                )
-
-        if source_frame == target_frame:
-            updated_point = point
-            steps: List[Dict[str, object]] = []
-            explain_lines = [
-                f"Resolving transform from '{source_frame}' to '{target_frame}':",
-                "",
-                "- Source and target are the same frame; no transform needed",
-            ]
-            payload: Dict[str, object] = {
-                "point": {
-                    "name": point_name,
-                    "frame": updated_point.frame.name,
-                    "coords": updated_point.coords.tolist(),
-                },
-                "transform": {"input": None, "output": None, "chain": []},
-            }
-            text_lines = [
-                f"Point '{point_name}' is already in frame '{target_frame}'",
-                f"Output point ({updated_point.frame.name}): {updated_point.coords.tolist()} {updated_point.frame.units}",
-            ]
-            if kwargs.get("show_chain"):
-                text_lines.append("Transform chain:")
-                text_lines.append("  <none>")
-            if kwargs.get("explain"):
-                payload["transform"]["explain"] = explain_lines
-                text_lines = explain_lines + [""] + text_lines
-            if kwargs.get("show_matrix"):
-                payload["transform"]["composed_matrix"] = np.eye(4).tolist()
-            session.add_point(point_name, updated_point)
-            return CommandResult(
-                message="\n".join(text_lines),
-                data=payload,
-                output_format="json" if kwargs.get("json") else "text",
-            )
-
-        if not transform_registry.list_transforms():
-            raise CommandExecutionError(
-                "No transforms are registered in this session. Import a transform or MRI volume first."
-            )
-
-        try:
-            chain, steps, explain_lines = _resolve_transform_chain(
-                transform_registry,
-                source_frame,
-                target_frame,
-                transform_names,
-            )
-        except TransformResolutionError as exc:
-            lines = []
-            if kwargs.get("explain") and exc.explain_lines:
-                lines.extend(exc.explain_lines)
-            lines.append(str(exc))
-            return CommandResult(
-                message="\n".join(lines),
-                data={"error": str(exc)},
-                output_format="json" if kwargs.get("json") else "text"
-            )
-
-        result = chain.apply(point)
-        if result.frame.name != target_frame:
-            raise CommandExecutionError(
-                f"Transform chain result frame '{result.frame.name}' does not match "
-                f"requested target frame '{target_frame}'."
-            )
-
-        session.add_point(point_name, result)
-
-        payload = {
-            "point": {
-                "name": point_name,
-                "frame": result.frame.name,
-                "coords": result.coords.tolist(),
-            },
-            "input": {
-                "frame": point.frame.name,
-                "coords": point.coords.tolist(),
-                "units": point.frame.units,
-            },
-            "output": {
-                "frame": result.frame.name,
-                "coords": result.coords.tolist(),
-                "units": result.frame.units,
-            },
-            "chain": steps,
-        }
-
-        text_lines = [
-            f"Transformed point '{point_name}' from '{source_frame}' to '{target_frame}'",
-            f"Input point ({point.frame.name}): {point.coords.tolist()} {point.frame.units}",
-            f"Output point ({result.frame.name}): {result.coords.tolist()} {result.frame.units}",
-        ]
-
-        if kwargs.get("show_chain"):
-            text_lines.append("Transform chain:")
-            for step in steps:
-                name = f"{step['name']} (inverse)" if step.get("inverted") else str(step["name"])
-                text_lines.append(f"  {step['source']} -> {step['target']}   (affine: {name})")
-
-        if kwargs.get("show_matrix"):
-            composed = chain.compose()
-            payload["composed_matrix"] = composed.matrix.tolist()
-            text_lines.append("Composed affine:")
-            text_lines.append(str(composed.matrix))
-
-        if kwargs.get("explain"):
-            payload["explain"] = explain_lines
-            text_lines = explain_lines + [""] + text_lines
-
-        return CommandResult(
-            message="\n".join(text_lines),
-            data=payload,
-            output_format="json" if kwargs.get("json") else "text",
-        )
-
-    if len(args) != 5:
-        raise CommandExecutionError(f"transform expects 2, 3, or 5 arguments, got {len(args)}")
-
-    source_frame, target_frame, x_str, y_str, z_str = args
-
-    frame_registry = session.frames
-    frames = {name: frame_registry.get_frame(name) for name in frame_registry.list_frames()}
-
-    if source_frame not in frames or target_frame not in frames:
-        raise CommandExecutionError(f"Unknown frame: source='{source_frame}' or target='{target_frame}'")
+def _get_point_for_transform(
+    session: Session,
+    point_name: str,
+    source_frame: str | None = None,
+) -> Point:
+    """Retrieve a point and validate its source frame."""
 
     try:
-        coords = [float(x_str), float(y_str), float(z_str)]
-    except ValueError as exc:
-        raise CommandExecutionError(f"Invalid coordinates: {exc}") from exc
+        point = session.get_point(point_name)
+    except KeyError as exc:
+        raise CommandExecutionError(
+            f"Unknown point: {point_name}"
+        ) from exc
 
-    point = Point(np.asarray(coords, dtype=float), frames[source_frame])
+    if source_frame is not None:
+        if point.frame.name != source_frame:
+            raise CommandExecutionError(
+                f"Point '{point_name}' is in frame "
+                f"'{point.frame.name}', not '{source_frame}'"
+            )
+
+    return point
+
+def _apply_point_transform(
+    session: Session,
+    point: Point,
+    target_frame: str,
+    transform_names: list[str] | None = None,
+):
+    """Apply a transform chain to a point."""
+
+    if point.frame.name == target_frame:
+        return point, [], [
+            f"Source and target are identical: '{target_frame}'"
+        ]
 
     try:
         chain, steps, explain_lines = _resolve_transform_chain(
-            transform_registry,
-            source_frame,
+            session.transforms,
+            point.frame.name,
             target_frame,
             transform_names,
         )
+
     except TransformResolutionError as exc:
-        lines = []
-        if kwargs.get("explain") and exc.explain_lines:
-            lines.extend(exc.explain_lines)
-        lines.append(str(exc))
-        return CommandResult(
-            message="\n".join(lines),
-            data={"error": str(exc)},
-            output_format="json" if kwargs.get("json") else "text"
-        )
+        raise CommandExecutionError(
+            str(exc)
+        ) from exc
 
     result = chain.apply(point)
 
     if result.frame.name != target_frame:
         raise CommandExecutionError(
-            f"Transform chain result frame '{result.frame.name}' does not match "
-            f"requested target frame '{target_frame}'."
+            f"Transform produced frame '{result.frame.name}', "
+            f"expected '{target_frame}'"
         )
 
-    payload: Dict[str, object] = {
-        "input": {
-            "frame": point.frame.name,
-            "coords": point.coords.tolist(),
-            "units": point.frame.units,
-        },
-        "output": {
-            "frame": result.frame.name,
-            "coords": result.coords.tolist(),
-            "units": result.frame.units,
-        },
+    return result, steps, explain_lines
+
+def _resolve_output_point_name(
+    session: Session,
+    requested_name: str | None,
+    original_name: str,
+    target_frame: str,
+) -> str:
+
+    if requested_name:
+        return requested_name
+
+    return f"{original_name}_{target_frame}"
+
+def _point_payload(
+    point_name: str,
+    point: Point,
+):
+    return {
+        "name": point_name,
+        "frame": point.frame.name,
+        "coords": point.coords.tolist(),
+        "units": point.frame.units,
+    }
+
+def _cmd_transform(
+    session: Session,
+    args: Sequence[str],
+    kwargs: Dict[str, Any],
+) -> CommandResult:
+
+    if len(args) not in {2, 3}:
+        raise CommandExecutionError(
+            "transform expects: "
+            "transform <point> <target> "
+            "or transform <point> <source> <target>"
+        )
+
+    chain_spec = kwargs.get("chain")
+
+    transform_names = (
+        chain_spec
+        if isinstance(chain_spec, list)
+        else [chain_spec]
+        if chain_spec
+        else None
+    )
+
+    point_name = args[0]
+
+    if len(args) == 2:
+        target_frame = args[1]
+        point = _get_point_for_transform(
+            session,
+            point_name,
+        )
+
+    else:
+        source_frame = args[1]
+        target_frame = args[2]
+
+        point = _get_point_for_transform(
+            session,
+            point_name,
+            source_frame,
+        )
+
+
+    result, steps, explain_lines = _apply_point_transform(
+        session,
+        point,
+        target_frame,
+        transform_names,
+    )
+
+
+    output_name = _resolve_output_point_name(
+        session,
+        kwargs.get("name"),
+        point_name,
+        target_frame,
+    )
+
+
+    if output_name in session.list_points():
+        raise CommandExecutionError(
+            f"Point '{output_name}' already exists"
+        )
+
+
+    session.create_transformed_point(
+        output_name,
+        result,
+    )
+
+
+    payload = {
+        "input": _point_payload(
+            point_name,
+            point,
+        ),
+        "output": _point_payload(
+            output_name,
+            result,
+        ),
         "chain": steps,
     }
 
-    text_lines: List[str] = []
-    text_lines.append(
-        f"Input point ({point.frame.name}): {point.coords.tolist()} {point.frame.units}"
-    )
-    text_lines.append(
-        f"Output point ({result.frame.name}): {result.coords.tolist()} {result.frame.units}"
-    )
+
+    text = [
+        f"Created transformed point '{output_name}'",
+        f"Input frame: {point.frame.name}",
+        f"Output frame: {result.frame.name}",
+        f"Coordinates: {result.coords.tolist()}",
+    ]
+
 
     if kwargs.get("show_chain"):
-        text_lines.append("Transform chain:")
+        text.append("Transform chain:")
         for step in steps:
-            name = f"{step['name']} (inverse)" if step.get("inverted") else str(step["name"])
-            text_lines.append(
-                f"  {step['source']} -> {step['target']}   (affine: {name})"
+            name = (
+                f"{step['name']} (inverse)"
+                if step.get("inverted")
+                else str(step["name"])
             )
 
-    if kwargs.get("show_matrix"):
-        composed = chain.compose()
-        payload["composed_matrix"] = composed.matrix.tolist()
-        text_lines.append("Composed affine:")
-        text_lines.append(str(composed.matrix))
+            text.append(
+                f"  {step['source']} -> {step['target']} ({name})"
+            )
+
 
     if kwargs.get("explain"):
         payload["explain"] = explain_lines
-        text_lines = explain_lines + [""] + text_lines
+        text = explain_lines + [""] + text
 
-    message = "\n".join(text_lines)
 
     return CommandResult(
-        message=message,
+        message="\n".join(text),
         data=payload,
-        output_format="json" if kwargs.get("json") else "text"
+        output_format="json" if kwargs.get("json") else "text",
     )
 
 
-def _cmd_volume_load(session: Session, args: Sequence[str], kwargs: Dict[str, Any]) -> CommandResult:
-    """Load a NIfTI volume into the session using MRI import routing.
+def _cmd_volume_import(
+    session: Session,
+    args: Sequence[str],
+    kwargs: Dict[str, Any],
+) -> CommandResult:
 
-    This now delegates to the import service so MRI volumes get subject-specific
-    frames and affine transforms instead of relying on shared default frames.
-    """
-    if len(args) != 1:
-        raise CommandExecutionError(f"volume load expects 1 argument, got {len(args)}")
-    
-    file_path = args[0]
+    if not args:
+        raise CommandExecutionError(
+            "volume import requires at least one file"
+        )
+
+    paths = [Path(p) for p in args]
+
     try:
-        image, info_msg = import_mri_image(session, file_path)
+        results = session.import_images(paths)
+
     except Exception as exc:
-        raise CommandExecutionError(f"Failed to import MRI image: {exc}") from exc
+        raise CommandExecutionError(
+            f"Failed to import volumes: {exc}"
+        ) from exc
 
-    first_line = info_msg.splitlines()[0] if info_msg else "Imported MRI image"
-    image_name = first_line.split(":", 1)[-1].strip() if ":" in first_line else Path(file_path).stem
 
-    payload: Dict[str, object] = {
-        "image": {
-            "name": image_name,
-            "path": file_path,
-            "shape": tuple(int(value) for value in image.shape),
-            "frame": image.frame.name,
-            "affine_shape": image.affine.shape,
-        }
+    payload = {
+        "images": [
+            {
+                "name": info.split(":",1)[-1].strip(),
+                "path": str(path),
+                "voxel_frame": image.voxel_frame.name,
+                "world_frame": image.world_frame.name,
+                "shape": tuple(int(v) for v in image.shape),
+                "affine_shape": image.affine.shape,
+            }
+            for (image, info), path
+            in zip(results, paths)
+        ]
     }
 
-    message = info_msg
+    message = "\n\n".join(
+        info
+        for _, info in results
+    )
 
     return CommandResult(
         message=message,
         data=payload,
-        output_format="json" if kwargs.get("json") else "text"
+        output_format="json" if kwargs.get("json") else "text",
     )
 
+def _cmd_transform_import(
+    session: Session,
+    args: Sequence[str],
+    kwargs: Dict[str, Any],
+) -> CommandResult:
 
-def _cmd_volume_import(session: Session, args: Sequence[str], kwargs: Dict[str, Any]) -> CommandResult:
-    return _cmd_volume_load(session, args, kwargs)
+    if not args:
+        raise CommandExecutionError(
+            "transform import requires at least one file"
+        )
+
+    paths = [Path(p) for p in args]
+
+    source_frame = kwargs.get("source_frame")
+    target_frame = kwargs.get("target_frame")
+
+    try:
+        results = session.import_transforms(
+            paths,
+            source_frame_name=source_frame,
+            target_frame_name=target_frame,
+        )
+
+    except Exception as exc:
+        raise CommandExecutionError(
+            f"Failed to import transforms: {exc}"
+        ) from exc
+
+
+    payload = {
+        "transforms": [
+            {
+                "path": str(path),
+                "source": transform.source.name,
+                "target": transform.target.name,
+            }
+            for (transform, _), path
+            in zip(results, paths)
+        ]
+    }
+
+
+    message = "\n\n".join(
+        info
+        for _, info in results
+    )
+
+    return CommandResult(
+        message=message,
+        data=payload,
+        output_format="json" if kwargs.get("json") else "text",
+    )
 
 
 def register_default_commands(registry: CommandRegistry) -> None:
     registry.register("point.add", _cmd_point_add, "point add <name> <x> <y> <z> <frame>")
     registry.register("point.list", _cmd_point_list, "point list")
     registry.register("frame.list", _cmd_frame_list, "frame list")
+    registry.register("transform.import", _cmd_transform_import, "transform.import <path1> <path2> ... [--source-frame frame] [--target-frame frame] [--json]")
     registry.register("transform", _cmd_transform, "transform <point> <target> [--chain name1 name2] [--show-chain] [--show-matrix] [--explain] [--json]")
     registry.register("transform.list", _cmd_transform_list, "transform list")
-    registry.register("volume.load", _cmd_volume_load, "volume load <path> [--json]")
-    registry.register("volume.import", _cmd_volume_import, "volume import <path> [--json]")
-    registry.register("surface.import", _cmd_surface_import, "surface import <path> [--name name] [--frame frame] [--json]")
+    registry.register("volume.import", _cmd_volume_import, "volume import <path1> <path2> ... [--json]")
+    registry.register("surface.import", _cmd_surface_import, "surface import <path1> <path2> ... [--name name1 name2 ...] [--frame frame1 frame2 ...] [--json]")
     registry.register("surface.list", _cmd_surface_list, "surface list")
     registry.register("view.surface", _cmd_view_surface, "view surface <name> [--json]")
     registry.register("view.volume", _cmd_view_volume, "view volume <name> [--json]")

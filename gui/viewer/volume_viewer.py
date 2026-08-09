@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable, Optional
+from typing import Callable, Optional, Protocol
 
 import numpy as np
 from PySide6.QtCore import Qt
@@ -11,9 +11,10 @@ from PySide6.QtGui import QColor, QImage, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QMenu, QSizePolicy, QSlider, QVBoxLayout, QWidget
 
 from core.image import Image
+from core.point import Point
 from core.session import Session
 
-from .render_utils import anatomical_axis_info, image_orientation, voxel_size, voxel_to_world, world_to_voxel
+from .render_utils import anatomical_axis_info, image_orientation, voxel_size, voxel_to_world, world_to_voxel, point_to_voxel, voxel_to_point
 from .viewer_tab import ViewerTab
 
 
@@ -57,6 +58,11 @@ class _PlaneSpec:
     col_group: str
 
 
+class _AxisInfo(Protocol):
+    voxel_axis: int
+    sign: int
+
+
 class VolumeViewer(ViewerTab):
     def __init__(self) -> None:
         super().__init__(title="MRI Viewer")
@@ -72,7 +78,7 @@ class VolumeViewer(ViewerTab):
         self._slice_names = ("Axial", "Coronal", "Sagittal")
         self._updating_controls = False
         self._registration_request_handler: Callable[[str | None], None] | None = None
-        self._axis_mapping: dict[str, object] = {}
+        self._axis_mapping: dict[str, _AxisInfo] = {}
         self._slider_group_order = ("lr", "ap", "si")
         self._slider_prefix = {
             "lr": "L-R",
@@ -154,10 +160,13 @@ class VolumeViewer(ViewerTab):
         if self._image_name is None or self._registration_request_handler is None:
             return
 
+        handler = self._registration_request_handler
+        image_name = self._image_name
+
         menu = QMenu(self)
         menu.addAction(
             "Register to...",
-            lambda: self._registration_request_handler(self._image_name),
+            lambda: handler(image_name),
         )
         global_position = widget.mapToGlobal(position)
         menu.exec(global_position)
@@ -184,7 +193,8 @@ class VolumeViewer(ViewerTab):
             ("Dimensions", f"{image.shape[0]} × {image.shape[1]} × {image.shape[2]}"),
             ("Voxel size", f"{voxel_spacing[0]:0.3f} × {voxel_spacing[1]:0.3f} × {voxel_spacing[2]:0.3f} mm"),
             ("Orientation", image_orientation(image)),
-            ("Frame", image.frame.name),
+            ("Voxel Frame", image.voxel_frame.name),
+            ("World Frame", image.world_frame.name),
             ("Display", "Axial / Coronal / Sagittal slices"),
         ])
 
@@ -231,6 +241,7 @@ class VolumeViewer(ViewerTab):
         indices = self._clamp_indices(indices)
         self._apply_cursor(indices)
 
+
     def _set_cursor_from_world(self, world_coords: tuple[float, float, float]) -> None:
         if self._image is None:
             return
@@ -273,13 +284,22 @@ class VolumeViewer(ViewerTab):
         matching_points = [
             (name, self._session.get_point(name))
             for name in self._session.list_points()
-            if self._session.get_point(name).frame.name == self._image.frame.name
+            if self._session.get_point(name).frame.name == self._image.voxel_frame.name
         ]
         if not matching_points:
             return
 
         _, point = matching_points[0]
-        self._set_cursor_from_world(tuple(float(value) for value in point.coords.tolist()))
+
+        voxel_coords = point_to_voxel(self._image, point)
+
+        self._set_cursor_from_voxel(
+            (
+                float(voxel_coords[0]),
+                float(voxel_coords[1]),
+                float(voxel_coords[2]),
+            )
+        )
 
     def _update_slice_panels(self, indices: tuple[int, int, int]) -> None:
         if self._image is None:
@@ -376,14 +396,14 @@ class VolumeViewer(ViewerTab):
 
         return col_index, row_index
 
-    def _matching_points_in_image_frame(self) -> list[tuple[str, object]]:
+    def _matching_points_in_image_frame(self) -> list[tuple[str, Point]]:
         if self._image is None or self._session is None:
             return []
 
         points = []
         for name in self._session.list_points():
             point = self._session.get_point(name)
-            if point.frame.name == self._image.frame.name:
+            if point.frame.name == self._image.voxel_frame.name:
                 points.append((name, point))
         return points
 
@@ -396,7 +416,7 @@ class VolumeViewer(ViewerTab):
         col_axis: int,
         row_sign: int,
         col_sign: int,
-        point_items: list[tuple[str, object]],
+        point_items: list[tuple[str, Point]],
     ) -> None:
         if self._image is None:
             return
@@ -406,7 +426,7 @@ class VolumeViewer(ViewerTab):
 
         for name, point in point_items:
             try:
-                voxel_coords = world_to_voxel(self._image, tuple(float(value) for value in point.coords.tolist()))
+                voxel_coords = point_to_voxel(self._image, point)
             except Exception:
                 continue
 

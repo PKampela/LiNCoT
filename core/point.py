@@ -26,3 +26,16 @@ class Point:
     @classmethod
     def from_iterable(cls, coords: Iterable[float], frame: CoordinateFrame) -> "Point":
         return cls(np.asarray(coords, dtype=float), frame)
+
+    def to_dict(self) -> dict:
+        """Convert the point to a dictionary representation."""
+        return {
+            "coords": self.coords.tolist(),
+            "frame": self.frame.to_dict(),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "Point":
+        """Create a Point from a dictionary representation."""
+        frame = CoordinateFrame.from_dict(data["frame"])
+        return cls(np.array(data["coords"]), frame) 

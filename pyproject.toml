@@ -3,9 +3,9 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "TMSLabs"
+name = "LiNCoT"
 version = "0.1.0"
-description = "TMSLabs coordinate transformation tool"
+description = "LiNCot, A Lightweight Neuronavigation Coordination Toolkit"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
@@ -19,7 +19,7 @@ dependencies = [
 ]
 
 [project.scripts]
-tmslabs = "launcher:main"
+LiNCoT = "launcher:main"
 
 [tool.setuptools]
 py-modules = ["launcher"]

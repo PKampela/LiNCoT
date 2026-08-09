@@ -7,6 +7,8 @@ from enum import Enum
 from scipy.spatial.ckdtree import cKDTree
 import numpy as np
 
+from core.asset import AssetMetadata
+
 from .frames import CoordinateFrame
 from .transform import Transform
 
@@ -16,7 +18,7 @@ class Surface:
     vertices: np.ndarray  # (N, 3)
     faces: np.ndarray     # (M, 3)
     frame: CoordinateFrame
-    metadata: dict | None = None
+    asset: AssetMetadata | None = None
     _kdtree: cKDTree | None = None
 
     def __post_init__(self) -> None:
@@ -41,7 +43,7 @@ class Surface:
             vertices=transformed_vertices,
             faces=self.faces.copy(),
             frame=self.frame,
-            metadata=self.metadata.copy() if self.metadata else None
+            asset=self.asset
         )
     
     def face_normals(self) -> np.ndarray:
@@ -68,6 +70,27 @@ class Surface:
         min_coords = np.min(self.vertices, axis=0)
         max_coords = np.max(self.vertices, axis=0)
         return min_coords, max_coords
+
+    def to_dict(self) -> dict:
+        """Convert the surface to a dictionary representation."""
+        return {
+            "vertices": self.vertices.tolist(),
+            "faces": self.faces.tolist(),
+            "frame": self.frame.to_dict(),
+            "asset": self.asset.to_dict() if self.asset else None,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> Surface:
+        """Create a Surface from a dictionary representation."""
+        frame = CoordinateFrame.from_dict(data["frame"])
+        asset = AssetMetadata.from_dict(data["asset"]) if data.get("asset") else None
+        return cls(
+            vertices=np.array(data["vertices"]),
+            faces=np.array(data["faces"]),
+            frame=frame,
+            asset=asset,
+        )
     
 class SurfaceRole(str, Enum):
     SCALP = "scalp"
@@ -83,6 +106,7 @@ class HeadModel:
     Geometric head model consisting of layered anatomical surfaces.
     """
     surfaces: Dict[SurfaceRole, Surface]
+    asset: AssetMetadata | None = None
 
     _MIN_REQUIRED = frozenset({
         SurfaceRole.SCALP,

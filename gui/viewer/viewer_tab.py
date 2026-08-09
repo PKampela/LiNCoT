@@ -69,7 +69,10 @@ class ViewerTab(QWidget):
         self.plotter = QtInteractor(self)
         self.plotter.set_background("#101418")
         add_axes(self.plotter)
-        self.plotter.interactor.AddObserver("MouseMoveEvent", self._update_hover_status)
+        self._observer_id = self.plotter.interactor.AddObserver(
+            "MouseMoveEvent",
+            self._update_hover_status
+        )
         content.addWidget(self.plotter, 1)
         content.addWidget(sidebar)
         root.addLayout(content)
@@ -116,12 +119,11 @@ class ViewerTab(QWidget):
         self.plotter.render()
 
     def clear_scene(self) -> None:
+        if self.plotter is None:
+            return
+
         self.plotter.clear()
         add_axes(self.plotter)
-
-    def closeEvent(self, event) -> None:  # type: ignore[override]
-        self.plotter.close()
-        super().closeEvent(event)
 
     def _update_hover_status(self, *_args) -> None:
         interactor = self.plotter.interactor
@@ -131,3 +133,15 @@ class ViewerTab(QWidget):
         if self._picker.Pick(x_pos, y_pos, 0, self.plotter.renderer):
             x_world, y_world, z_world = self._picker.GetPickPosition()
             self.set_status(f"Cursor: ({x_world:0.2f}, {y_world:0.2f}, {z_world:0.2f})")
+
+    def cleanup(self):
+        try:
+            if self._observer_id:
+                self.plotter.interactor.RemoveObserver(self._observer_id)
+        except Exception:
+            pass
+
+        try:
+            self.plotter.close()
+        except RuntimeError:
+            pass

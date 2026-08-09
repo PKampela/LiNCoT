@@ -86,50 +86,53 @@ QUALITY_PRESETS: dict[str, RegistrationSettings] = {
 # ---------------------------------------------------------------------
 
 
+from scipy.ndimage import zoom
+import numpy as np
+
+from core.image import Image
+
+
 def downsample_image(image: Image, size: int) -> Image:
     """
-    Downsample an image isotropically while preserving physical space.
+    Downsample an image while preserving its world-space coordinate system.
 
-    This changes voxel resolution but keeps the affine consistent so that
-    world-space coordinates remain correct.
+    The voxel spacing is increased so that physical dimensions remain
+    approximately unchanged. The world origin is preserved.
     """
 
-    max_dim = max(image.data.shape)
+    shape = np.asarray(image.data.shape[:3], dtype=float)
+
+    max_dim = float(np.max(shape))
     if size > max_dim:
         raise ValueError(
-            f"Requested size {size} is larger than max dimension {max_dim}."
+            f"Requested size {size} exceeds largest image dimension {int(max_dim)}."
         )
 
-    # Compute isotropic scale factor based on largest dimension
-    factor = max_dim / size
+    factor = max_dim / float(size)
 
-    # zoom < 1 => downsampling
-    zoom_factors = tuple(1.0 / factor for _ in image.data.shape)
+    zoom_factor = 1.0 / factor
 
-    resampled_data = zoom(
+    resampled = zoom(
         image.data,
-        zoom=zoom_factors,
-        order=1,          # linear interpolation (good default for MRI)
+        zoom=(zoom_factor, zoom_factor, zoom_factor),
+        order=1,
         mode="constant",
         cval=0.0,
     )
 
-    # Only scale linear part (rotation + voxel spacing)
-    new_affine = image.affine.copy()
-    new_affine[:3, :3] *= factor
+    affine = image.affine.copy()
 
-    # Keep translation consistent with center of voxel grid
-    # (prevents spatial drift during pyramid construction)
-    shape_old = np.array(image.data.shape[:3])
-    shape_new = np.array(resampled_data.shape[:3])
+    # Increase voxel spacing
+    affine[:3, :3] *= factor
 
-    scale_shift = (shape_old - shape_new) / 2.0
-    new_affine[:3, 3] += image.affine[:3, :3] @ scale_shift
+    # Preserve world origin
+    # (No translation correction.)
 
     return Image(
-        data=np.asarray(resampled_data),
-        affine=new_affine,
-        frame=image.frame,
+        data=np.asarray(resampled),
+        affine=affine,
+        voxel_frame=image.voxel_frame,
+        world_frame=image.world_frame,
     )
 
 
@@ -305,8 +308,8 @@ def registration_cost(
     matrix = registration_matrix(parameters, moving_com_world)
 
     transform = Transform(
-        source=moving.frame,
-        target=reference.frame,
+        source=moving.world_frame,
+        target=reference.world_frame,
         matrix=matrix,
     )
 
@@ -537,8 +540,8 @@ def _run_registration_pipeline(
             parameters = last_result.x
 
             transform = Transform(
-                source=moving_level.frame,
-                target=reference_level.frame,
+                source=moving_level.world_frame,
+                target=reference_level.world_frame,
                 matrix=registration_matrix(parameters, moving_com_world)
             )
 
@@ -572,8 +575,8 @@ def _run_registration_pipeline(
             parameters = last_result.x
 
             transform = Transform(
-                source=moving_level.frame,
-                target=reference_level.frame,
+                source=moving_level.world_frame,
+                target=reference_level.world_frame,
                 matrix=registration_matrix(parameters, moving_com_world),
             )
 
@@ -607,8 +610,8 @@ def _run_registration_pipeline(
             parameters = last_result.x
 
             transform = Transform(
-                source=moving_level.frame,
-                target=reference_level.frame,
+                source=moving_level.world_frame,
+                target=reference_level.world_frame,
                 matrix=registration_matrix(parameters, moving_com_world),
             )
 
@@ -710,8 +713,8 @@ def affine_registration(
     )[0]
 
     return Transform(
-        source=moving.frame,
-        target=reference.frame,
+        source=moving.world_frame,
+        target=reference.world_frame,
         matrix=registration_matrix(parameters, moving_com_world),
     )
 
@@ -751,8 +754,8 @@ def register_images(
         np.asarray(moving_com_voxel)[None],
     )[0]
     transform = Transform(
-        source=moving.frame,
-        target=reference.frame,
+        source=moving.world_frame,
+        target=reference.world_frame,
         matrix=registration_matrix(parameters, moving_com_world),
     )
     report = _registration_report(parameters, result, quality)

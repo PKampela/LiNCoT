@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Literal, overload
+
 import numpy as np
 from scipy.ndimage import map_coordinates
 
@@ -282,6 +284,7 @@ def sample_registration_points(
         order=order,
         mode=mode,
         cval=cval,
+        return_mask=False,
     )
 
     return reference_values, sampled.reshape(len(x), len(y), len(z))

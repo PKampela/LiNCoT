@@ -58,7 +58,7 @@ class SessionInspectorWidget(QWidget):
         self.overview.setPlaceholderText("Session summary will appear here.")
 
         self.points_table = self._make_table(["Name", "Frame", "X", "Y", "Z"])
-        self.images_table = self._make_table(["Name", "Frame", "Shape"])
+        self.images_table = self._make_table(["Name", "Voxel Frame", "World Frame", "Shape"])
         self.transforms_table = self._make_table(["Name", "Source", "Target", "Matrix"])
         self.surfaces_table = self._make_table(["Name", "Frame", "Vertices", "Faces"])
         self.frames_table = self._make_table(["Name", "Axes", "Units", "Description"])
@@ -97,13 +97,19 @@ class SessionInspectorWidget(QWidget):
                 for name in session.list_points()
             ],
         )
-        self._populate_table(
-            self.images_table,
-            [
-                [name, session.get_image(name).frame.name, str(tuple(int(value) for value in session.get_image(name).shape))]
-                for name in session.list_images()
-            ],
-        )
+        rows = []
+
+        for name in session.list_images():
+            image = session.get_image(name)
+
+            rows.append([
+                name,
+                image.voxel_frame.name,
+                image.world_frame.name,
+                str(tuple(int(v) for v in image.shape)),
+            ])
+
+        self._populate_table(self.images_table, rows)
         self._populate_table(
             self.transforms_table,
             [
@@ -113,7 +119,7 @@ class SessionInspectorWidget(QWidget):
                     session.transforms.get_transform(name).target.name,
                     self._matrix_summary(session.transforms.get_transform(name).matrix.tolist()),
                 ]
-                for name in session.transforms.list_transforms()
+                for name in session.transforms.names()
             ],
         )
         self._populate_table(
@@ -137,7 +143,7 @@ class SessionInspectorWidget(QWidget):
                     session.frames.get_frame(name).units,
                     session.frames.get_frame(name).description or "",
                 ]
-                for name in session.frames.list_frames()
+                for name in session.frames.names()
             ],
         )
 
@@ -171,13 +177,13 @@ class SessionInspectorWidget(QWidget):
 
     def _build_overview_text(self, session: Session) -> str:
         lines = [
-            f"Subject: {session.subject_id or 'unnamed'}",
-            f"Description: {session.description or 'No description set'}",
+            f"Subject: {session.subject.subject_id or 'unnamed'}",
+            f"Description: {session.project.description or 'No description set'}",
             "",
-            f"Frames: {len(session.frames.list_frames())}",
+            f"Frames: {len(session.frames.names())}",
             f"Points: {len(session.list_points())}",
             f"Images: {len(session.list_images())}",
-            f"Transforms: {len(session.transforms.list_transforms())}",
+            f"Transforms: {len(session.transforms.names())}",
             f"Surfaces: {len(session.list_surfaces())}",
             "",
             "In a real TMS workflow, this panel is used to verify the session context before targeting or navigation:",

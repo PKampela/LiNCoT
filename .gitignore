@@ -1,6 +1,12 @@
 dataset/
 bem/
 surfaces/
+examples/
+reports/
+docsmaterial.md
+download_mne_data.py
+__pycache__/
+.vscode/
 *.nii
 *.nii.gz
 *.fif

@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Optional, cast
+from typing import TYPE_CHECKING, Any, Optional, cast
 
 import numpy as np
+
+from pathlib import Path
 
 from core.frames import CoordinateFrame
 from core.transform import Transform
@@ -70,7 +72,7 @@ def _get_frame_name_from_mne_id(frame_id: int) -> str:
 
 
 def load_mne_transform(
-    path: str,
+    path: Path,
     source_frame: Optional[CoordinateFrame] = None,
     target_frame: Optional[CoordinateFrame] = None,
 ) -> Transform:
@@ -91,9 +93,9 @@ def load_mne_transform(
 
 
 def load_transform_with_frame_mapping(
-    path: str,
+    path: Path,
     frame_registry: FrameRegistry,
-) -> tuple[Transform, str, str]:
+) -> tuple[CoordinateFrame, CoordinateFrame, np.ndarray, str, str]:
     """Load an MNE transform and auto-map frames based on MNE frame IDs.
 
     This is the recommended way to import MNE transforms, as it automatically
@@ -105,7 +107,7 @@ def load_transform_with_frame_mapping(
         frame_registry: FrameRegistry to look up frames by name
 
     Returns:
-        Tuple of (Transform, source_frame_name, target_frame_name)
+        Tuple of (source_frame, target_frame, matrix, source_frame_name, target_frame_name)
 
     Raises:
         ValueError: If frames are not registered or frame IDs are unknown
@@ -149,18 +151,16 @@ def load_transform_with_frame_mapping(
         )
         frame_registry.register_frame(target_frame)
 
-    transform = Transform(source=source_frame, target=target_frame, matrix=matrix)
-
-    return transform, from_name, to_name
+    return source_frame, target_frame, matrix, from_name, to_name
 
 
-def head_to_mri_transform(path: str, head_frame: CoordinateFrame, mri_frame: CoordinateFrame) -> Transform:
+def head_to_mri_transform(path: Path, head_frame: CoordinateFrame, mri_frame: CoordinateFrame) -> Transform:
     """Load a head -> MRI transform."""
 
     return load_mne_transform(path, source_frame=head_frame, target_frame=mri_frame)
 
 
-def mri_to_mni_transform(path: str, mri_frame: CoordinateFrame, mni_frame: CoordinateFrame) -> Transform:
+def mri_to_mni_transform(path: Path, mri_frame: CoordinateFrame, mni_frame: CoordinateFrame) -> Transform:
     """Load an MRI -> MNI transform."""
 
     return load_mne_transform(path, source_frame=mri_frame, target_frame=mni_frame)

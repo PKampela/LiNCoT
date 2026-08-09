@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import cast
+from pathlib import Path
 
 import numpy as np
 from nibabel import as_closest_canonical
@@ -13,7 +14,7 @@ from core.image import Image
 from core.transform import Transform
 
 
-def _load_canonical(path: str) -> Nifti1Image:
+def _load_canonical(path: Path) -> Nifti1Image:
     """
     Load a NIfTI image and convert it to canonical RAS voxel order.
 
@@ -27,20 +28,17 @@ def _load_canonical(path: str) -> Nifti1Image:
 
 
 def load_nifti_image(
-    path: str,
-    frame: CoordinateFrame,
-) -> Image:
+    path: Path,
+) -> tuple[np.ndarray, np.ndarray]:
     """
     Load a NIfTI image in canonical RAS voxel order.
     """
 
     img = _load_canonical(path)
+    data =np.asarray(img.dataobj)
+    affine=np.asarray(img.affine, dtype=float)
 
-    return Image(
-        data=np.asarray(img.dataobj),
-        affine=np.asarray(img.affine, dtype=float),
-        frame=frame,
-    )
+    return data, affine
 
 
 def voxel_to_world_transform(

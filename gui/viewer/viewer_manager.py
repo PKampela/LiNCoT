@@ -126,6 +126,18 @@ class ViewerManager:
 
     def close_tab(self, index: int) -> None:
         widget = self._tabs.widget(index)
+
+        if widget is None:
+            return
+
         self._tabs.removeTab(index)
-        if widget is not None:
-            widget.deleteLater()
+
+        viewer_any = cast(Any, widget)
+        if hasattr(viewer_any, "cleanup"):
+            viewer_any.cleanup()
+
+        widget.deleteLater()
+
+    def close_all_tabs(self) -> None:
+        for index in reversed(range(self._tabs.count())):
+            self.close_tab(index)
