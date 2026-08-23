@@ -74,9 +74,6 @@ ACCURATE = RegistrationSettings(
     translation_maxiter = 50,
     rigid_maxiter = 80,
     affine_maxiter = 100,
-
-    xtol = 1e-3,
-    ftol = 1e-4,
 )
 
 QUALITY_PRESETS: dict[str, RegistrationSettings] = {
