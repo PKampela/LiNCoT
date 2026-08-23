@@ -137,7 +137,7 @@ def load_transform_with_frame_mapping(
             units="mm",
             description=f"MNE frame: {from_name}",
         )
-        frame_registry.register_frame(source_frame)
+        frame_registry.add_frame(source_frame)
 
     try:
         target_frame = frame_registry.get_frame(to_name)
@@ -149,7 +149,7 @@ def load_transform_with_frame_mapping(
             units="mm",
             description=f"MNE frame: {to_name}",
         )
-        frame_registry.register_frame(target_frame)
+        frame_registry.add_frame(target_frame)
 
     return source_frame, target_frame, matrix, from_name, to_name
 

@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Tuple
+from itertools import permutations
+from typing import Tuple, cast
 
 import numpy as np
 import pyvista as pv
@@ -121,47 +122,64 @@ def image_orientation(image: Image) -> str:
 
 
 def anatomical_axis_info(image: Image) -> dict[str, AnatomicalAxisInfo]:
-    """Map anatomical LR/AP/SI groups to voxel axes from the image affine."""
+    """
+    Map anatomical LR/AP/SI groups to voxel axes from the image affine.
 
-    codes = aff2axcodes(np.asarray(image.affine, dtype=float))
-    mapping: dict[str, AnatomicalAxisInfo] = {}
+    The returned sign describes the anatomical direction of increasing
+    voxel index:
 
-    for voxel_axis, code in enumerate(codes):
-        if code in {"L", "R"}:
-            group = "lr"
-            sign = 1 if code == "R" else -1
-        elif code in {"P", "A"}:
-            group = "ap"
-            sign = 1 if code == "A" else -1
-        elif code in {"I", "S"}:
-            group = "si"
-            sign = 1 if code == "S" else -1
-        else:
-            continue
+        +1 -> voxel index increases toward R/A/S
+        -1 -> voxel index increases toward L/P/I
+    """
 
-        mapping[group] = AnatomicalAxisInfo(
-            group=group,
-            voxel_axis=voxel_axis,
-            code=str(code),
-            sign=sign,
+    affine = np.asarray(image.affine, dtype=float)
+    basis = affine[:3, :3]
+
+    # Choose a one-to-one mapping world-axis -> voxel-axis that maximizes
+    # absolute basis alignment. This stays stable even for oblique affines.
+    best_perm: tuple[int, int, int] | None = None
+    best_score = float("-inf")
+    for perm_values in permutations((0, 1, 2)):
+        perm = cast(tuple[int, int, int], perm_values)
+        score = (
+            abs(float(basis[0, perm[0]]))
+            + abs(float(basis[1, perm[1]]))
+            + abs(float(basis[2, perm[2]]))
         )
+        if score > best_score:
+            best_score = score
+            best_perm = perm
 
-    # Fallback for uncommon/degenerate affines: keep predictable identity mapping.
-    if "lr" not in mapping:
-        mapping["lr"] = AnatomicalAxisInfo(group="lr", voxel_axis=0, code="R", sign=1)
-    if "ap" not in mapping:
-        fallback_axis = 1 if mapping["lr"].voxel_axis != 1 else 2
-        mapping["ap"] = AnatomicalAxisInfo(group="ap", voxel_axis=fallback_axis, code="A", sign=1)
-    if "si" not in mapping:
-        used = {mapping["lr"].voxel_axis, mapping["ap"].voxel_axis}
-        fallback_axis = 0
-        for candidate in (0, 1, 2):
-            if candidate not in used:
-                fallback_axis = candidate
-                break
-        mapping["si"] = AnatomicalAxisInfo(group="si", voxel_axis=fallback_axis, code="S", sign=1)
+    assert best_perm is not None
 
-    return mapping
+    lr_axis = best_perm[0]
+    ap_axis = best_perm[1]
+    si_axis = best_perm[2]
+
+    lr_sign = 1 if float(basis[0, lr_axis]) >= 0.0 else -1
+    ap_sign = 1 if float(basis[1, ap_axis]) >= 0.0 else -1
+    si_sign = 1 if float(basis[2, si_axis]) >= 0.0 else -1
+
+    return {
+        "lr": AnatomicalAxisInfo(
+            group="lr",
+            voxel_axis=lr_axis,
+            code="R" if lr_sign > 0 else "L",
+            sign=lr_sign,
+        ),
+        "ap": AnatomicalAxisInfo(
+            group="ap",
+            voxel_axis=ap_axis,
+            code="A" if ap_sign > 0 else "P",
+            sign=ap_sign,
+        ),
+        "si": AnatomicalAxisInfo(
+            group="si",
+            voxel_axis=si_axis,
+            code="S" if si_sign > 0 else "I",
+            sign=si_sign,
+        ),
+    }
 
 
 def voxel_size(image: Image) -> tuple[float, float, float]:

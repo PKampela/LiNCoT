@@ -1,4 +1,4 @@
-"""Application launcher selecting CLI or GUI interface for TMSLabs."""
+"""Application launcher selecting CLI or GUI interface for LiNCoT."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from gui.app import run_app
 from core.project_manager import ProjectManager
 
 
-def build_startup_session() -> Session:
+def build_cli_startup_session() -> Session:
     """Create the initial session, recovering autosaved work if available."""
 
     manager = ProjectManager()
@@ -36,20 +36,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = build_arg_parser().parse_args()
-
-    session = Session.create_empty_session()
     command_registry = build_command_registry()
 
     if args.cli and args.gui:
         raise SystemExit("Choose either --cli or --gui, not both")
 
     if args.cli:
+        session = build_cli_startup_session()
         return run_interactive_cli(
             session=session,
             registry=command_registry,
         )
     return run_app(
-        session=session,
         command_registry=command_registry,
     )
 

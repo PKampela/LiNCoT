@@ -10,6 +10,51 @@ from scipy.ndimage import map_coordinates
 from .image import Image
 from .transform import Transform
 
+from dataclasses import dataclass
+
+@dataclass(frozen=True)
+class RegistrationSamples:
+    reference_frame: object
+    reference_points_world: np.ndarray
+    reference_values: np.ndarray
+
+def sample_moving_image_at_reference_points(
+    moving_image: Image,
+    reference_points_world: np.ndarray,
+    moving_to_reference_matrix: np.ndarray,
+    order: int = 1,
+    mode: str = "constant",
+    cval: float = 0.0,
+) -> np.ndarray:
+    """
+    Sample moving image intensities at fixed reference-world points.
+
+    moving_to_reference_matrix maps moving-world coordinates to
+    reference-world coordinates.
+    """
+
+    inverse = np.linalg.inv(moving_to_reference_matrix)
+
+    homogeneous = np.column_stack(
+        (
+            reference_points_world,
+            np.ones(len(reference_points_world)),
+        )
+    )
+
+    moving_world = (
+        inverse @ homogeneous.T
+    ).T[:, :3]
+
+    return sample_image(
+        moving_image,
+        moving_world,
+        order=order,
+        mode=mode,
+        cval=cval,
+        return_mask=False,
+    )
+
 
 def world_to_voxel(image: Image, points_world: np.ndarray) -> np.ndarray:
     """
@@ -180,6 +225,36 @@ def sample_registration_points(
         Resampled image with the same shape as reference_image.
     """
 
+    if moving_image.data is None or reference_image.data is None:
+        raise ValueError("Registration sampling requires images with voxel data")
+
+    # ------------------------------------------------------------------
+    # Normalize transform direction to moving->reference.
+    # ------------------------------------------------------------------
+
+    source_frame = moving_to_reference.source
+    target_frame = moving_to_reference.target
+
+    if (
+        source_frame == moving_image.world_frame
+        and target_frame == reference_image.world_frame
+    ):
+        moving_to_reference_matrix = moving_to_reference.matrix
+    elif (
+        source_frame == reference_image.world_frame
+        and target_frame == moving_image.world_frame
+    ):
+        moving_to_reference_matrix = np.linalg.inv(moving_to_reference.matrix)
+        if debug:
+            print("\nSampling: input transform was reference->moving; inverted it.")
+    else:
+        raise ValueError(
+            "Transform frame mismatch in registration sampling: "
+            f"transform {source_frame.name}->{target_frame.name}, "
+            f"expected {moving_image.world_frame.name}->{reference_image.world_frame.name} "
+            "or its inverse"
+        )
+
     # ------------------------------------------------------------------
     # Generate every voxel coordinate of the reference image
     # ------------------------------------------------------------------
@@ -217,7 +292,7 @@ def sample_registration_points(
     # therefore invert it.
     # ------------------------------------------------------------------
 
-    inverse = np.linalg.inv(moving_to_reference.matrix)
+    inverse = np.linalg.inv(moving_to_reference_matrix)
 
     homogeneous = np.column_stack(
         (world_ref, np.ones(len(world_ref)))

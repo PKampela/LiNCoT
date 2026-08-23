@@ -1,4 +1,4 @@
-"""Main Qt window for TMSLabs GUI."""
+"""Main Qt window for LiNCoT GUI."""
 
 from __future__ import annotations
 
@@ -122,14 +122,13 @@ class MainWindow(QMainWindow):
         self._command_registry = command_registry
         self._project_manager = ProjectManager()
 
-        self.setWindowTitle("TMSLabs")
+        self.setWindowTitle("LiNCoT")
         self.resize(1400, 900)
 
         self._build_ui()
         self._build_menus()
         self._connect_context_menus()
 
-        self._check_recovery()
         self._refresh_session()
         self._rebuild_object_menus()
 
@@ -237,7 +236,7 @@ class MainWindow(QMainWindow):
 
         self._help_menu.addAction(self._action("Command Reference", self._show_command_reference))
         self._help_menu.addSeparator()
-        self._help_menu.addAction(self._action("About TMSLabs", self._show_about))
+        self._help_menu.addAction(self._action("About LiNCoT", self._show_about))
 
     def _connect_context_menus(self) -> None:
         self.inspector.images_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -299,7 +298,9 @@ class MainWindow(QMainWindow):
         self._rebuild_object_menus()
 
     def _on_session_changed(self) -> None:
+        self._session.project.is_dirty = True
         self._refresh_session()
+        self._update_window_title()
 
     def _autosave(self) -> None:
         if not self._session.project.is_dirty:
@@ -322,28 +323,15 @@ class MainWindow(QMainWindow):
 
 
     def closeEvent(self, event: QCloseEvent) -> None:
-        print("CLOSE EVENT: entered", flush=True)
-
-        print("CLOSE EVENT: checking unsaved state", flush=True)
         if not self._confirm_discard_unsaved():
-            print("CLOSE EVENT: user cancelled", flush=True)
             event.ignore()
             return
 
-        print("CLOSE EVENT: confirmation complete", flush=True)
+        self._project_manager.clear_recovery()
 
-        print("CLOSE EVENT: starting autosave", flush=True)
-        self._project_manager.autosave(self._session)
-        print("CLOSE EVENT: autosave complete", flush=True)
-
-        print("CLOSE EVENT: starting viewer shutdown", flush=True)
         self.viewer_manager.close_all_tabs()
-        print("CLOSE EVENT: viewer shutdown complete", flush=True)
 
-        print("CLOSE EVENT: accepting event", flush=True)
         event.accept()
-
-        print("CLOSE EVENT: finished", flush=True)
 
     def _import_mri_dialog(self) -> None:
         paths, _ = QFileDialog.getOpenFileNames(
@@ -358,19 +346,26 @@ class MainWindow(QMainWindow):
         for path in paths:
             self._import_mri_from_path(Path(path))
 
+    def _set_session(self, session: Session) -> None:
+        """Replace the active session throughout the GUI."""
+        self._session = session
+
+        self.viewer_manager.set_session(session)
+        self.console_widget.set_session(session)
+
+        self.viewer_manager.close_all_tabs()
+        self.viewer_manager.create_viewer_tab("base", "Overview")
+
+        self._refresh_session()
+        self._rebuild_object_menus()
+        self._update_window_title()
+
     def _new_workspace(self) -> None:
 
         if not self._confirm_discard_unsaved():
             return
 
-        self._session = Session.create_empty_session()
-
-        self.viewer_manager.close_all_tabs()
-
-        self._refresh_session()
-        self._rebuild_object_menus()
-
-        self._update_window_title()
+        self._set_session(Session.create_empty_session())
 
         self._set_status(
             "Workspace created",
@@ -379,7 +374,6 @@ class MainWindow(QMainWindow):
         )
 
     def _confirm_discard_unsaved(self) -> bool:
-
         if not self._session.project.is_dirty:
             return True
 
@@ -408,12 +402,12 @@ class MainWindow(QMainWindow):
         result = box.exec()
 
         if result == QMessageBox.StandardButton.Save:
-            self._save_project_dialog()
+            return self._save_project_dialog()
+
+        if result == QMessageBox.StandardButton.Discard:
             return True
-        elif result == QMessageBox.StandardButton.Discard:
-            return True
-        else:
-            return False
+
+        return False
 
 
     def _recent_projects(self) -> None:
@@ -450,16 +444,7 @@ class MainWindow(QMainWindow):
             )
             return
 
-        self._session = session
-
-        try:
-            self.viewer_manager.close_all_tabs()
-        except Exception:
-            pass
-
-        self._refresh_session()
-        self._update_window_title()
-
+        self._set_session(session)
         if session.load_warnings:
             QMessageBox.warning(
                 self,
@@ -475,18 +460,17 @@ class MainWindow(QMainWindow):
             level="info",
         )
 
-    def _save_project_dialog(self) -> None:
+    def _save_project_dialog(self) -> bool:
         """Save the current project."""
 
         project_path = self._session.project.project_path
 
         if project_path is None:
-            self._save_project_as_dialog()
-            return
+            return self._save_project_as_dialog()
 
-        self._save_project(project_path)
+        return self._save_project(project_path)
 
-    def _save_project_as_dialog(self) -> None:
+    def _save_project_as_dialog(self) -> bool:
         """Prompt the user for a project location."""
 
         directory = QFileDialog.getExistingDirectory(
@@ -496,11 +480,11 @@ class MainWindow(QMainWindow):
         )
 
         if not directory:
-            return
+            return False
 
-        self._save_project(Path(directory))
+        return self._save_project(Path(directory))
 
-    def _save_project(self, project_path: Path) -> None:
+    def _save_project(self, project_path: Path) -> bool:
         """Save the current session as a project."""
 
         try:
@@ -516,7 +500,7 @@ class MainWindow(QMainWindow):
                 timeout=8000,
                 level="error",
             )
-            return
+            return False
 
         self._update_window_title()
         self._project_manager.clear_recovery()
@@ -530,6 +514,8 @@ class MainWindow(QMainWindow):
             level="info",
         )
 
+        return True
+
     def _update_window_title(self) -> None:
         """Update the application title."""
 
@@ -538,7 +524,7 @@ class MainWindow(QMainWindow):
         if not project_name:
             project_name = "Untitled Workspace"
 
-        self.setWindowTitle(f"TMSLabs - {project_name}")
+        self.setWindowTitle(f"LiNCoT - {project_name}")
 
     def _import_mri_from_path(self, path: Path) -> None:
         try:
@@ -554,7 +540,7 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             QMessageBox.warning(self, "Import MRI Image", f"Image imported but viewer could not open: {exc}")
 
-        self._refresh_session()
+        self._on_session_changed()
         self._set_status("MRI imported", info_msg, timeout=8000, level="info")
 
     def _import_surface_dialog(self) -> None:
@@ -587,7 +573,7 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             QMessageBox.warning(self, "Import Surface", f"Surface imported but viewer could not open: {exc}")
 
-        self._refresh_session()
+        self._on_session_changed()
         self._set_status("Surface imported", info_msg, timeout=8000, level="info")
 
     def _import_transform_xfm(
@@ -623,7 +609,7 @@ class MainWindow(QMainWindow):
             source_frame_name=source_frame_name,
             target_frame_name=target_frame_name,
         )
-
+        self._on_session_changed()
         self._set_status(
             "Transform imported",
             info_msg,
@@ -677,7 +663,7 @@ class MainWindow(QMainWindow):
                     level="error",
                 )
 
-        self._refresh_session()
+        self._on_session_changed()
 
     def _open_registration_dialog(self, moving_image_name: str | None = None) -> None:
         image_names = self._session.list_images()
@@ -734,7 +720,7 @@ class MainWindow(QMainWindow):
             return
 
         progress.close()
-        self._refresh_session()
+        self._on_session_changed()
 
         report = result.data.get("report") if result.data else result.message
         self._set_status("Registration complete", str(report), timeout=8000, level="info")
@@ -775,8 +761,8 @@ class MainWindow(QMainWindow):
     def _show_about(self) -> None:
         QMessageBox.information(
             self,
-            "About TMSLabs",
-            "TMSLabs provides a GUI for viewing neuroimaging volumes, surfaces, transforms, and session state.",
+            "About LiNCoT",
+            "LiNCoT provides a GUI for viewing neuroimaging volumes, surfaces, transforms, and session state.",
         )
 
     def _set_status(self, short_msg: str, detailed: str | None = None, timeout: int = 8000, level: str = "info") -> None:
@@ -809,45 +795,3 @@ class MainWindow(QMainWindow):
 
     def _close_viewer_tab(self, index: int) -> None:
         self.viewer_manager.close_tab(index)
-
-    def _check_recovery(self) -> None:
-        """Check for autosaved recovery data on startup."""
-
-        if not self._project_manager.has_recovery():
-            return
-
-        recovery_path = self._project_manager.default_recovery_path()
-
-        result = QMessageBox.question(
-            self,
-            "Recover Workspace",
-            (
-                "A previous workspace was recovered after an unexpected shutdown.\n\n"
-                "Would you like to restore it?"
-            ),
-            QMessageBox.StandardButton.Yes
-            | QMessageBox.StandardButton.No,
-        )
-
-        if result == QMessageBox.StandardButton.Yes:
-            try:
-                self._session = self._project_manager.load(
-                    recovery_path
-                )
-
-                self._set_status(
-                    "Workspace recovered",
-                    "Recovered autosaved workspace",
-                    timeout=5000,
-                    level="info",
-                )
-
-            except Exception as exc:
-                QMessageBox.warning(
-                    self,
-                    "Recovery Failed",
-                    f"Could not recover workspace:\n\n{exc}",
-                )
-
-        else:
-            self._project_manager.clear_recovery()

@@ -7,13 +7,13 @@ from uuid import UUID, uuid4
 
 @dataclass
 class ProjectMetadata:
-    """Metadata describing a TMSLabs project."""
+    """Metadata describing a LiNCoT project."""
 
     project_id: UUID = field(default_factory=uuid4)
 
     name: str = "Untitled Project"
 
-    application: str = "TMSLabs"
+    application: str = "LiNCoT"
 
     project_version: int = 1
 
@@ -25,7 +25,7 @@ class ProjectMetadata:
         default_factory=lambda: datetime.now().isoformat()
     )
 
-    is_dirty: bool = True
+    is_dirty: bool = False
 
     description: str | None = None
 
@@ -48,7 +48,7 @@ class ProjectMetadata:
         return cls(
             project_id=UUID(data["project_id"]),
             name=data["name"],
-            application=data.get("application", "TMSLabs"),
+            application=data.get("application", "LiNCoT"),
             project_version=data.get("project_version", 1),
             created=data.get("created"),
             modified=data.get("modified"),

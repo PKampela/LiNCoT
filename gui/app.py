@@ -6,11 +6,12 @@ import sys
 from pathlib import Path
 
 from PySide6.QtGui import QColor, QPalette
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QMessageBox
 
 from core.session import Session
 from gui.main_window import MainWindow
 from registry.command_registry import CommandRegistry
+from core.project_manager import ProjectManager
 
 
 def _apply_theme(app: QApplication) -> None:
@@ -142,11 +143,44 @@ def _apply_theme(app: QApplication) -> None:
     )
 
 
-def run_app(session: Session, command_registry: CommandRegistry) -> int:
+def run_app(
+    command_registry: CommandRegistry,
+) -> int:
     app = QApplication(sys.argv)
     _apply_theme(app)
 
-    window = MainWindow(session=session, command_registry=command_registry)
+    project_manager = ProjectManager()
+    session = Session.create_empty_session()
+
+    if project_manager.has_recovery():
+        result = QMessageBox.question(
+            None,
+            "Recover Workspace",
+            (
+                "A previous workspace was recovered after an unexpected shutdown.\n\n"
+                "Would you like to restore it?"
+            ),
+            QMessageBox.StandardButton.Yes
+            | QMessageBox.StandardButton.No,
+        )
+
+        if result == QMessageBox.StandardButton.Yes:
+            try:
+                session = project_manager.load_recovery()
+            except Exception as exc:
+                QMessageBox.warning(
+                    None,
+                    "Recovery Failed",
+                    f"Could not recover workspace:\n\n{exc}",
+                )
+                project_manager.clear_recovery()
+        else:
+            project_manager.clear_recovery()
+
+    window = MainWindow(
+        session=session,
+        command_registry=command_registry,
+    )
     window.show()
 
     return app.exec()

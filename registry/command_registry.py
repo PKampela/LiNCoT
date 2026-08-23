@@ -9,7 +9,7 @@ from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Seque
 
 import numpy as np
 
-from core.import_service import import_image as import_mri_image
+from core.import_service import import_image
 from core.chain import TransformChain
 from core.registration import register_images, registration_report_lines
 from core.point import Point

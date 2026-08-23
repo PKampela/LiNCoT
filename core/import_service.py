@@ -550,7 +550,12 @@ def _import_nifti_image(session: Session, path: Path) -> tuple["Image", str]:
         f"  Intensity range: {float(np.min(image.data)):0.3f} -> {float(np.max(image.data)):0.3f}\n"
         f"  Transform: {forward_name}"
     )
+
+    import nibabel as nib
+
+
     return image, info_msg
+
 
 
 def _validate_transform(transform: Transform) -> None:

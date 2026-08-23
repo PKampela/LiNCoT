@@ -1,4 +1,4 @@
-"""Bottom-panel inspector for the current TMSLabs session."""
+"""Bottom-panel inspector for the current LiNCoT session."""
 
 from __future__ import annotations
 

@@ -26,7 +26,7 @@ class ProjectValidationReport:
         return len(self.missing_assets) == 0
     
 class ProjectManager:
-    """Manage saving, loading, and recovery of TMSLabs projects."""
+    """Manage saving, loading, and recovery of LiNCoT projects."""
 
     PROJECT_FILE = "project.json"
 
@@ -116,7 +116,7 @@ class ProjectManager:
     def default_recovery_path(self) -> Path:
         return (
             Path.home()
-            / ".tmslabs"
+            / ".lincot"
             / "recovery"
         )
 

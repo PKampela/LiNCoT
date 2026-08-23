@@ -1,4 +1,4 @@
-"""CLI entry point for TMSLabs."""
+"""CLI entry point for LiNCoT."""
 
 from __future__ import annotations
 

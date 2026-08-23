@@ -1,4 +1,4 @@
-name: tmslabs
+name: lincot
 channels:
   - conda-forge
   - defaults

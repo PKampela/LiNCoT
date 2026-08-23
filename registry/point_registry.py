@@ -84,7 +84,7 @@ class PointRegistry:
         registry = cls()
         for name, payload in data.items():
             point = Point.from_dict(payload)
-            registry.register_point(name, point)
+            registry.add_point(name, point)
         return registry
 
 

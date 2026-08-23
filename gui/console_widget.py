@@ -40,6 +40,10 @@ class ConsoleWidget(QWidget):
 
         self.input.returnPressed.connect(self._on_return_pressed)
 
+    def set_session(self, session: Session) -> None:
+        """Replace the active session used by the console."""
+        self._session = session
+
     def _append(self, text: str) -> None:
         self.output.append(text)
 
@@ -58,10 +62,25 @@ class ConsoleWidget(QWidget):
                 parsed.args,
                 parsed.kwargs,
             )
+
+            point_name = None
+
+            if parsed.command == "point.add" and result.data:
+                point_name = result.data.get("name")
+
+            if self._on_session_changed is not None:
+                self._on_session_changed()
+
             if self._viewer_manager is not None and result.data:
                 try:
-                    self._viewer_manager.open_from_descriptor(result.data.get("viewer"))
-                except Exception as exc:  # pragma: no cover - depends on local GUI stack
+                    self._viewer_manager.open_from_descriptor(
+                        result.data.get("viewer")
+                    )
+
+                    if point_name:
+                        self._viewer_manager.focus_point(point_name)
+
+                except Exception as exc:
                     self._append(f"Viewer error: {exc}")
 
             if result.output_format == "json" and result.data is not None:

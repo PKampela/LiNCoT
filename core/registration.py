@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import numpy as np
-from scipy.ndimage import center_of_mass
+from scipy.ndimage import center_of_mass, map_coordinates
 from scipy.optimize import OptimizeResult, minimize
 from scipy.ndimage import zoom
 
@@ -9,7 +9,7 @@ from dataclasses import dataclass
 
 from .frames import CoordinateFrame
 from .image import Image
-from .sampling import sample_registration_points, world_to_voxel, voxel_to_world
+from .sampling import sample_registration_points, world_to_voxel, voxel_to_world, RegistrationSamples, sample_moving_image_at_reference_points
 from .transform import Transform
 
 
@@ -17,15 +17,15 @@ from .transform import Transform
 class RegistrationSettings:
 
     pyramid_sizes: tuple[int, ...]
-    sample_steps: tuple[int, ...] #Currently there is a bug where only the first sample step is used, so this should be a single value for now. Fix later to allow for different sample steps at different pyramid levels.
+    sample_steps: tuple[int, ...]
 
     translation: bool = True
     rigid: bool = True
     affine: bool = True
 
-    translation_maxiter: int = 100
-    rigid_maxiter: int = 100
-    affine_maxiter: int = 100
+    translation_maxiter: int = 50
+    rigid_maxiter: int = 50
+    affine_maxiter: int = 50
 
     xtol: float = 1e-2
     ftol: float = 1e-3
@@ -47,9 +47,9 @@ FAST = RegistrationSettings(
     rigid=True,
     affine=False,
 
-    translation_maxiter = 30,
+    translation_maxiter = 20,
     rigid_maxiter = 30,
-    affine_maxiter = 40,
+    affine_maxiter = 50,
 )
 
 STANDARD = RegistrationSettings(
@@ -59,21 +59,24 @@ STANDARD = RegistrationSettings(
     rigid=True,
     affine=True,
 
-    translation_maxiter = 50,
+    translation_maxiter = 30,
     rigid_maxiter = 50,
-    affine_maxiter = 60,
+    affine_maxiter = 80,
 )
 
 ACCURATE = RegistrationSettings(
-    pyramid_sizes=(32, 64, 128, 128),
+    pyramid_sizes=(32, 64, 128, 192),
     sample_steps=(4, 2, 1, 1),
     translation=True,
     rigid=True,
     affine=True,
 
-    translation_maxiter = 100,
-    rigid_maxiter = 100,
+    translation_maxiter = 50,
+    rigid_maxiter = 80,
     affine_maxiter = 100,
+
+    xtol = 1e-3,
+    ftol = 1e-4,
 )
 
 QUALITY_PRESETS: dict[str, RegistrationSettings] = {
@@ -91,46 +94,153 @@ import numpy as np
 
 from core.image import Image
 
-
 def downsample_image(image: Image, size: int) -> Image:
     """
-    Downsample an image while preserving its world-space coordinate system.
+    Downsample a 3D image while preserving its world-space geometry.
 
-    The voxel spacing is increased so that physical dimensions remain
-    approximately unchanged. The world origin is preserved.
+    The largest output dimension is approximately ``size`` voxels.
+    The output grid remains aligned with the original image's voxel
+    axes and world-space orientation.
+
+    No anatomical reorientation is performed. The orientation encoded
+    by ``image.affine`` is preserved.
     """
+    if image.data is None:
+        raise ValueError("Cannot downsample an image without voxel data")
 
-    shape = np.asarray(image.data.shape[:3], dtype=float)
+    if image.data.ndim != 3:
+        raise ValueError("Registration downsampling requires a 3D image")
 
-    max_dim = float(np.max(shape))
-    if size > max_dim:
-        raise ValueError(
-            f"Requested size {size} exceeds largest image dimension {int(max_dim)}."
+    original_shape = np.asarray(image.data.shape, dtype=int)
+
+    max_dim = int(original_shape.max())
+
+    if size <= 0:
+        raise ValueError("Downsampling size must be positive")
+
+    if size >= max_dim:
+        return Image(
+            data=np.asarray(image.data),
+            affine=image.affine.copy(),
+            voxel_frame=image.voxel_frame,
+            world_frame=image.world_frame,
         )
+
+    # ---------------------------------------------------------------
+    # Determine the downsampling factor.
+    #
+    # Example:
+    #   256 x 256 x 160
+    #   size = 64
+    #
+    # factor = 4
+    # output ≈ 64 x 64 x 40
+    # ---------------------------------------------------------------
 
     factor = max_dim / float(size)
 
-    zoom_factor = 1.0 / factor
+    output_shape = np.maximum(
+        1,
+        np.round(original_shape / factor).astype(int),
+    )
 
-    resampled = zoom(
+    # ---------------------------------------------------------------
+    # Preserve the physical voxel axes.
+    #
+    # The original affine columns describe the world-space direction
+    # and spacing of each voxel axis.
+    #
+    # We increase the voxel spacing by the corresponding reduction
+    # factor.
+    # ---------------------------------------------------------------
+
+    original_axis_vectors = image.affine[:3, :3]
+
+    original_spacing = np.linalg.norm(
+        original_axis_vectors,
+        axis=0,
+    )
+
+    new_spacing = original_spacing * factor
+
+    directions = original_axis_vectors / original_spacing
+
+    new_affine = image.affine.copy()
+    new_affine[:3, :3] = directions * new_spacing
+
+    # ---------------------------------------------------------------
+    # Preserve the physical centre of the image.
+    #
+    # This is important. Simply keeping affine[:3, 3] unchanged while
+    # changing the voxel spacing moves the centre of the represented
+    # volume.
+    # ---------------------------------------------------------------
+
+    original_center_voxel = (original_shape - 1) / 2.0
+    original_center_world = (
+        image.affine
+        @ np.append(original_center_voxel, 1.0)
+    )[:3]
+
+    output_center_voxel = (output_shape - 1) / 2.0
+
+    new_affine[:3, 3] = (
+        original_center_world
+        - new_affine[:3, :3] @ output_center_voxel
+    )
+
+    # ---------------------------------------------------------------
+    # Resample by constructing output-grid voxel coordinates and
+    # mapping them back into the original voxel space.
+    # ---------------------------------------------------------------
+
+    grid = np.meshgrid(
+        np.arange(output_shape[0], dtype=float),
+        np.arange(output_shape[1], dtype=float),
+        np.arange(output_shape[2], dtype=float),
+        indexing="ij",
+    )
+
+    output_voxels = np.stack(
+        [g.ravel() for g in grid],
+        axis=1,
+    )
+
+    output_world = voxel_to_world(
+        Image(
+            data=None,
+            affine=new_affine,
+            voxel_frame=image.voxel_frame,
+            world_frame=image.world_frame,
+            shape_metadata=tuple(output_shape),
+        ),
+        output_voxels,
+    )
+
+    input_voxels = world_to_voxel(
+        image,
+        output_world,
+    )
+
+    # scipy.ndimage.map_coordinates expects one coordinate array
+    # per input dimension.
+    resampled = map_coordinates(
         image.data,
-        zoom=(zoom_factor, zoom_factor, zoom_factor),
+        [
+            input_voxels[:, 0],
+            input_voxels[:, 1],
+            input_voxels[:, 2],
+        ],
         order=1,
         mode="constant",
         cval=0.0,
     )
 
-    affine = image.affine.copy()
-
-    # Increase voxel spacing
-    affine[:3, :3] *= factor
-
-    # Preserve world origin
-    # (No translation correction.)
+    resampled = resampled.reshape(tuple(output_shape))
 
     return Image(
         data=np.asarray(resampled),
-        affine=affine,
+        affine=new_affine,
         voxel_frame=image.voxel_frame,
         world_frame=image.world_frame,
     )
@@ -288,46 +398,81 @@ def registration_matrix(
 # Objective function
 # ---------------------------------------------------------------------
 
-_registration_calls = 0
 def registration_cost(
     parameters: np.ndarray,
     moving: Image,
-    reference: Image,
     moving_com_world: np.ndarray,
-    sample_step: int = 1,
+    samples: RegistrationSamples,
 ) -> float:
-    """
-    Objective minimized during optimization.
-    """
-    global _registration_calls
-    _registration_calls += 1
 
-    if _registration_calls % 25 == 0:
-        print(f"Cost evaluation {_registration_calls}")
-        
-    matrix = registration_matrix(parameters, moving_com_world)
-
-    transform = Transform(
-        source=moving.world_frame,
-        target=reference.world_frame,
-        matrix=matrix,
+    matrix = registration_matrix(
+        parameters,
+        moving_com_world,
     )
 
-    reference_values, moving_values = sample_registration_points(
+    moving_values = sample_moving_image_at_reference_points(
         moving_image=moving,
-        reference_image=reference,
-        moving_to_reference=transform,
-        step=sample_step,
-        debug = (_registration_calls % 50 == 0),
+        reference_points_world=samples.reference_points_world,
+        moving_to_reference_matrix=matrix,
     )
-    if _registration_calls % 25 == 0:
-        print(f"Resampled shape: {moving_values.shape}")
+
     similarity = normalized_cross_correlation(
-        reference_values,
+        samples.reference_values,
         moving_values,
     )
 
     return -similarity
+
+
+def prepare_registration_samples(
+    reference_image: Image,
+    step: int = 1,
+) -> RegistrationSamples:
+    """
+    Precompute the fixed reference sampling locations and intensities.
+
+    These values are independent of the registration parameters and
+    therefore only need to be calculated once per pyramid level.
+    """
+
+    if reference_image.data is None:
+        raise ValueError(
+            "Registration sampling requires an image with voxel data"
+        )
+
+    x = np.arange(0, reference_image.shape[0], step)
+    y = np.arange(0, reference_image.shape[1], step)
+    z = np.arange(0, reference_image.shape[2], step)
+
+    grid = np.meshgrid(
+        x,
+        y,
+        z,
+        indexing="ij",
+    )
+
+    voxel_ref = np.stack(
+        [g.ravel() for g in grid],
+        axis=1,
+    )
+
+    reference_values = reference_image.data[
+        voxel_ref[:, 0].astype(int),
+        voxel_ref[:, 1].astype(int),
+        voxel_ref[:, 2].astype(int),
+    ]
+
+    reference_points_world = voxel_to_world(
+        reference_image,
+        voxel_ref,
+    )
+
+    return RegistrationSamples(
+        reference_frame=reference_image.world_frame,
+        reference_points_world=reference_points_world,
+        reference_values=reference_values,
+    )
+
 
 
 # ---------------------------------------------------------------------
@@ -343,11 +488,13 @@ def _translation_registration(
     sample_step: int,
     settings: RegistrationSettings,
 ) -> OptimizeResult:
-    """
-    Optimize translation only while keeping rotation and scaling fixed.
-    """
 
     initial = initial.copy()
+
+    samples = prepare_registration_samples(
+        reference,
+        step=sample_step,
+    )
 
     bounds = [
         (None, None),
@@ -357,7 +504,6 @@ def _translation_registration(
         (initial[3], initial[3]),
         (initial[4], initial[4]),
         (initial[5], initial[5]),
-
         (initial[6], initial[6]),
         (initial[7], initial[7]),
         (initial[8], initial[8]),
@@ -366,7 +512,11 @@ def _translation_registration(
     return minimize(
         registration_cost,
         initial,
-        args=(moving, reference, moving_com_world, sample_step),
+        args=(
+            moving,
+            moving_com_world,
+            samples,
+        ),
         method="Powell",
         bounds=bounds,
         options={
@@ -389,17 +539,22 @@ def _rigid_registration(
     Optimize translation and rotation.
     Scaling remains fixed.
     """
+    samples = prepare_registration_samples(
+        reference,
+        step=sample_step,
+    )
 
     initial = initial.copy()
+    max_rotation = np.deg2rad(30.0)
 
     bounds = [
         (None, None),
         (None, None),
         (None, None),
 
-        (-np.pi/2, np.pi/2),
-        (-np.pi/2, np.pi/2),
-        (-np.pi/2, np.pi/2),
+        (-max_rotation, max_rotation),
+        (-max_rotation, max_rotation),
+        (-max_rotation, max_rotation),
 
         (initial[6], initial[6]),
         (initial[7], initial[7]),
@@ -409,7 +564,7 @@ def _rigid_registration(
     return minimize(
         registration_cost,
         initial,
-        args=(moving, reference, moving_com_world, sample_step),
+        args=(moving, moving_com_world, samples),
         method="Powell",
         bounds=bounds,
         options={
@@ -431,16 +586,22 @@ def _affine_registration(
     Optimize full affine transform.
     """
 
+    samples = prepare_registration_samples(
+        reference,
+        step=sample_step,
+    )
+
     initial = initial.copy()
+    max_rotation = np.deg2rad(30.0)
 
     bounds = [
         (None, None),
         (None, None),
         (None, None),
 
-        (-np.pi/2, np.pi/2),
-        (-np.pi/2, np.pi/2),
-        (-np.pi/2, np.pi/2),
+        (-max_rotation, max_rotation),
+        (-max_rotation, max_rotation),
+        (-max_rotation, max_rotation),
 
         (0.7, 1.4),
         (0.7, 1.4),
@@ -450,7 +611,7 @@ def _affine_registration(
     return minimize(
         registration_cost,
         initial,
-        args=(moving, reference, moving_com_world, sample_step),
+        args=(moving, moving_com_world, samples),
         method="Powell",
         bounds=bounds,
         options={
@@ -467,7 +628,7 @@ def _run_registration_pipeline(
     moving: Image,
     reference: Image,
     settings: RegistrationSettings,
-) -> tuple[np.ndarray, OptimizeResult | None]:
+) -> tuple[np.ndarray, OptimizeResult | None, np.ndarray]:
 
     parameters = np.array([
         *center_of_mass_translation(moving, reference),
@@ -478,19 +639,6 @@ def _run_registration_pipeline(
         1.0,
         1.0,
     ])
-
-    print("=" * 70)
-    print("Registration started")
-    print(f"Moving image    : {moving.data.shape}")
-    print(f"Reference image : {reference.data.shape}")
-    print(f"Pyramid         : {settings.pyramid_sizes}")
-    print(f"Translation     : {settings.translation}")
-    print(f"Rigid           : {settings.rigid}")
-    print(f"Affine          : {settings.affine}")
-    print()
-    print("Initial parameters:")
-    print(parameters)
-    print("=" * 70)
 
     last_result = None
 
@@ -506,6 +654,18 @@ def _run_registration_pipeline(
 
         moving_level = downsample_image(moving, size)
         reference_level = downsample_image(reference, size)
+
+        print("\n--- Geometry after downsampling ---")
+        import nibabel as nib
+        for name, image in [
+            ("moving", moving_level),
+            ("reference", reference_level),
+        ]:
+            print(name)
+            print("  shape:", image.shape)
+            print("  axcodes:", nib.aff2axcodes(image.affine))
+            print("  affine:")
+            print(image.affine)
 
         moving_com_voxel = center_of_mass(moving_level.data)
 
@@ -545,13 +705,13 @@ def _run_registration_pipeline(
                 matrix=registration_matrix(parameters, moving_com_world)
             )
 
+            # show_registration_debug(
+            #     moving=moving_level,
+            #     reference=reference_level,
+            #     transform=transform,
+            #     title=f"Level {level} - affine",
+            # )
 
-            show_registration_debug(
-                moving=moving_level,
-                reference=reference_level,
-                transform=transform,
-                title=f"Level {level} - Translation",
-            )
 
             print(f"Finished in {time.perf_counter()-t:.2f} s")
             print("Parameters:", parameters)
@@ -574,19 +734,25 @@ def _run_registration_pipeline(
 
             parameters = last_result.x
 
+            print("Parameters:", parameters)
+            print(
+                "Rigid rotation (deg):",
+                np.round(np.rad2deg(parameters[3:6]), 3),
+            )
+
             transform = Transform(
                 source=moving_level.world_frame,
                 target=reference_level.world_frame,
                 matrix=registration_matrix(parameters, moving_com_world),
             )
 
+            # show_registration_debug(
+            #     moving=moving_level,
+            #     reference=reference_level,
+            #     transform=transform,
+            #     title=f"Level {level} - affine",
+            # )
 
-            show_registration_debug(
-                moving=moving_level,
-                reference=reference_level,
-                transform=transform,
-                title=f"Level {level} - rigid",
-            )
 
             print(f"Finished in {time.perf_counter()-t:.2f} s")
             print("Parameters:", parameters)
@@ -609,6 +775,12 @@ def _run_registration_pipeline(
 
             parameters = last_result.x
 
+            print("Parameters:", parameters)
+            print(
+                "Rigid rotation (deg):",
+                np.round(np.rad2deg(parameters[3:6]), 3),
+            )
+
             transform = Transform(
                 source=moving_level.world_frame,
                 target=reference_level.world_frame,
@@ -616,12 +788,13 @@ def _run_registration_pipeline(
             )
 
 
-            show_registration_debug(
-                moving=moving_level,
-                reference=reference_level,
-                transform=transform,
-                title=f"Level {level} - affine",
-            )
+
+            # show_registration_debug(
+            #     moving=moving_level,
+            #     reference=reference_level,
+            #     transform=transform,
+            #     title=f"Level {level} - affine",
+            # )
 
             print(f"Finished in {time.perf_counter()-t:.2f} s")
             print("Parameters:", parameters)
@@ -631,7 +804,10 @@ def _run_registration_pipeline(
     print("Final parameters:")
     print(parameters)
 
-    return parameters, last_result
+    print("Final matrix:")
+    print(transform.matrix)
+
+    return parameters, last_result, moving_com_world
 
 
 def _registration_report(
@@ -703,14 +879,7 @@ def affine_registration(
     """
     _validate_registration_inputs(moving, reference)
 
-    parameters, _result = _run_registration_pipeline(moving, reference, settings)
-
-    moving_com_voxel = center_of_mass(moving.data)
-
-    moving_com_world = voxel_to_world(
-        moving,
-        np.asarray(moving_com_voxel)[None],
-    )[0]
+    parameters, _result, moving_com_world = _run_registration_pipeline(moving, reference, settings)
 
     return Transform(
         source=moving.world_frame,
@@ -747,12 +916,8 @@ def register_images(
 ) -> tuple[Transform, RegistrationReport]:
     _validate_registration_inputs(moving, reference)
     settings = get_quality_preset(quality)
-    parameters, result = _run_registration_pipeline(moving, reference, settings)
-    moving_com_voxel = center_of_mass(moving.data)
-    moving_com_world = voxel_to_world(
-        moving,
-        np.asarray(moving_com_voxel)[None],
-    )[0]
+    parameters, result, moving_com_world = _run_registration_pipeline(moving, reference, settings)
+
     transform = Transform(
         source=moving.world_frame,
         target=reference.world_frame,
@@ -773,45 +938,61 @@ def show_registration_debug(
     title: str = "Registration debug",
 ):
     """
-    Compact registration diagnostics.
+    Display registration diagnostics using anatomical orientations.
 
-    Focuses on:
-        - orientation
-        - voxel spacing
-        - transform sanity
-        - registration quality
-        - visual comparison
+    The moving image is resampled onto the reference voxel grid using
+    the supplied moving->reference world-space transform.  Reference
+    and moving slices are then displayed using the reference anatomical
+    planes rather than assuming that raw array axes are sagittal,
+    coronal and axial.
+
+    Rows:
+        Axial
+        Coronal
+        Sagittal
+
+    Columns:
+        Reference
+        Moving
+        Overlay
     """
 
     import nibabel as nib
-
-    print("\n" + "=" * 70)
-    print(title)
-    print("=" * 70)
+    import matplotlib.pyplot as plt
 
     # -------------------------------------------------------------
     # Basic image information
     # -------------------------------------------------------------
 
+    print("\n" + "=" * 70)
+    print(title)
+    print("=" * 70)
+
     print("\nReference")
     print(f"  Shape       : {reference.shape}")
-    print(f"  Affine       : {reference.affine}")
+    print(f"  Affine      :\n{reference.affine}")
     print(f"  Orientation : {nib.aff2axcodes(reference.affine)}")
 
     print("\nMoving")
     print(f"  Shape       : {moving.shape}")
-    print(f"  Affine       : {moving.affine}")
+    print(f"  Affine      :\n{moving.affine}")
     print(f"  Orientation : {nib.aff2axcodes(moving.affine)}")
 
-    ref_spacing = np.linalg.norm(reference.affine[:3, :3], axis=0)
-    mov_spacing = np.linalg.norm(moving.affine[:3, :3], axis=0)
+    ref_spacing = np.linalg.norm(
+        reference.affine[:3, :3],
+        axis=0,
+    )
+    mov_spacing = np.linalg.norm(
+        moving.affine[:3, :3],
+        axis=0,
+    )
 
     print("\nVoxel spacing (mm)")
     print("  Reference :", np.round(ref_spacing, 2))
     print("  Moving    :", np.round(mov_spacing, 2))
 
     # -------------------------------------------------------------
-    # Sample moving image
+    # Sample moving image onto reference voxel grid
     # -------------------------------------------------------------
 
     reference_values, moving_resampled = sample_registration_points(
@@ -821,14 +1002,23 @@ def show_registration_debug(
         step=1,
     )
 
-    reference_volume = reference.data.astype(np.float32)
-    moving_volume = moving_resampled.astype(np.float32)
+    reference_volume = np.asarray(
+        reference_values,
+        dtype=np.float32,
+    ).reshape(reference.shape)
+
+    moving_volume = np.asarray(
+        moving_resampled,
+        dtype=np.float32,
+    )
 
     # -------------------------------------------------------------
     # Transform centre of reference image
     # -------------------------------------------------------------
 
-    centre_voxel = (np.array(reference.shape) - 1) / 2
+    centre_voxel = (
+        np.asarray(reference.shape, dtype=float) - 1.0
+    ) / 2.0
 
     centre_world = voxel_to_world(
         reference,
@@ -838,8 +1028,7 @@ def show_registration_debug(
     inverse = np.linalg.inv(transform.matrix)
 
     moving_world = (
-        inverse
-        @ np.append(centre_world, 1)
+        inverse @ np.append(centre_world, 1.0)
     )[:3]
 
     moving_voxel = world_to_voxel(
@@ -848,19 +1037,32 @@ def show_registration_debug(
     )[0]
 
     print("\nCentre mapping")
-    print(f"  Reference voxel : {np.round(centre_voxel,2)}")
-    print(f"  Moving voxel    : {np.round(moving_voxel,2)}")
+    print(
+        f"  Reference voxel : "
+        f"{np.round(centre_voxel, 2)}"
+    )
+    print(
+        f"  Reference world : "
+        f"{np.round(centre_world, 2)}"
+    )
+    print(
+        f"  Moving voxel    : "
+        f"{np.round(moving_voxel, 2)}"
+    )
+    print(
+        f"  Moving world    : "
+        f"{np.round(moving_world, 2)}"
+    )
 
     inside = np.all(
         (moving_voxel >= 0)
-        &
-        (moving_voxel < np.array(moving.shape))
+        & (moving_voxel < np.asarray(moving.shape)),
     )
 
     print(f"  Inside moving   : {inside}")
 
     # -------------------------------------------------------------
-    # Sampling statistics
+    # Sampling diagnostics
     # -------------------------------------------------------------
 
     x = np.arange(reference.shape[0])
@@ -884,27 +1086,32 @@ def show_registration_debug(
         voxel_ref,
     )
 
-    moving_world = (
+    moving_world_all = (
         inverse
         @ np.column_stack(
             (world_ref, np.ones(len(world_ref)))
         ).T
     ).T[:, :3]
 
-    moving_voxel = world_to_voxel(
+    moving_voxel_all = world_to_voxel(
         moving,
-        moving_world,
+        moving_world_all,
     )
 
     inside = np.all(
-        (moving_voxel >= 0)
-        &
-        (moving_voxel < np.array(moving.shape)),
+        (moving_voxel_all >= 0)
+        & (
+            moving_voxel_all
+            < np.asarray(moving.shape)
+        ),
         axis=1,
     )
 
     print("\nSampling")
-    print(f"  Inside voxels : {inside.mean()*100:.1f}%")
+    print(
+        f"  Inside voxels : "
+        f"{inside.mean() * 100:.1f}%"
+    )
 
     # -------------------------------------------------------------
     # NCC
@@ -916,10 +1123,10 @@ def show_registration_debug(
     ref -= ref.min()
     mov -= mov.min()
 
-    if ref.max():
+    if ref.max() > 0:
         ref /= ref.max()
 
-    if mov.max():
+    if mov.max() > 0:
         mov /= mov.max()
 
     ncc = np.corrcoef(
@@ -930,51 +1137,189 @@ def show_registration_debug(
     print(f"\nWhole-volume NCC : {ncc:.4f}")
 
     # -------------------------------------------------------------
-    # Display
+    # Anatomical orientation and deterministic plane extraction
     # -------------------------------------------------------------
 
-    cx = ref.shape[0] // 2
-    cy = ref.shape[1] // 2
-    cz = ref.shape[2] // 2
+    ref_codes = nib.aff2axcodes(reference.affine)
 
-    slices = [
-        (ref[cx,:,:], mov[cx,:,:], "Sagittal"),
-        (ref[:,cy,:], mov[:,cy,:], "Coronal"),
-        (ref[:,:,cz], mov[:,:,cz], "Axial"),
-    ]
+    print("\nReference anatomical orientation:")
+    print(f"  Axis 0 : {ref_codes[0]}")
+    print(f"  Axis 1 : {ref_codes[1]}")
+    print(f"  Axis 2 : {ref_codes[2]}")
+
+    affine_basis = np.asarray(reference.affine, dtype=float)[:3, :3]
+
+    def _axis_mapping_from_affine() -> dict[str, tuple[int, int, str]]:
+        # Choose one-to-one voxel-axis assignment that best aligns with
+        # world X/Y/Z directions. This is robust for permuted/oblique affines.
+        best_perm: tuple[int, int, int] | None = None
+        best_score = float("-inf")
+
+        for a0 in (0, 1, 2):
+            for a1 in (0, 1, 2):
+                if a1 == a0:
+                    continue
+                for a2 in (0, 1, 2):
+                    if a2 == a0 or a2 == a1:
+                        continue
+
+                    score = (
+                        abs(float(affine_basis[0, a0]))
+                        + abs(float(affine_basis[1, a1]))
+                        + abs(float(affine_basis[2, a2]))
+                    )
+
+                    if score > best_score:
+                        best_score = score
+                        best_perm = (a0, a1, a2)
+
+        if best_perm is None:
+            raise ValueError("Failed to derive anatomical axis mapping from affine")
+
+        lr_axis, ap_axis, si_axis = best_perm
+
+        lr_sign = 1 if float(affine_basis[0, lr_axis]) >= 0.0 else -1
+        ap_sign = 1 if float(affine_basis[1, ap_axis]) >= 0.0 else -1
+        si_sign = 1 if float(affine_basis[2, si_axis]) >= 0.0 else -1
+
+        return {
+            "lr": (lr_axis, lr_sign, "R" if lr_sign > 0 else "L"),
+            "ap": (ap_axis, ap_sign, "A" if ap_sign > 0 else "P"),
+            "si": (si_axis, si_sign, "S" if si_sign > 0 else "I"),
+        }
+
+    axis_mapping = _axis_mapping_from_affine()
+
+    print("\nResolved anatomical mapping:")
+    for group in ("lr", "ap", "si"):
+        voxel_axis, sign, code = axis_mapping[group]
+        print(
+            f"  {group.upper()}: voxel axis {voxel_axis}, code {code}, sign {sign}"
+        )
+
+    def _extract_oriented_slice(
+        volume: np.ndarray,
+        fixed_axis: int,
+        slice_index: int,
+        row_axis: int,
+        col_axis: int,
+        row_sign: int,
+        col_sign: int,
+    ) -> np.ndarray:
+        slice_data = np.take(volume, slice_index, axis=fixed_axis)
+
+        remaining_axes = [
+            axis for axis in range(3)
+            if axis != fixed_axis
+        ]
+
+        row_position = remaining_axes.index(row_axis)
+        col_position = remaining_axes.index(col_axis)
+
+        oriented = np.transpose(
+            slice_data,
+            axes=(row_position, col_position),
+        )
+
+        if row_sign > 0:
+            oriented = np.flip(oriented, axis=0)
+        if col_sign > 0:
+            oriented = np.flip(oriented, axis=1)
+
+        return np.asarray(oriented)
+
+    # Row order is fixed and independent of image orientation.
+    plane_specs = (
+        ("Axial", "si", "ap", "lr"),
+        ("Coronal", "ap", "si", "lr"),
+        ("Sagittal", "lr", "si", "ap"),
+    )
+
+    centre = np.asarray(reference.shape, dtype=int) // 2
+    slices: list[tuple[np.ndarray, np.ndarray, str]] = []
+
+    for label, fixed_group, row_group, col_group in plane_specs:
+        fixed_axis, _fixed_sign, _fixed_code = axis_mapping[fixed_group]
+        row_axis, row_sign, _row_code = axis_mapping[row_group]
+        col_axis, col_sign, _col_code = axis_mapping[col_group]
+
+        slice_index = int(centre[fixed_axis])
+
+        reference_slice = _extract_oriented_slice(
+            ref,
+            fixed_axis=fixed_axis,
+            slice_index=slice_index,
+            row_axis=row_axis,
+            col_axis=col_axis,
+            row_sign=row_sign,
+            col_sign=col_sign,
+        )
+
+        moving_slice = _extract_oriented_slice(
+            mov,
+            fixed_axis=fixed_axis,
+            slice_index=slice_index,
+            row_axis=row_axis,
+            col_axis=col_axis,
+            row_sign=row_sign,
+            col_sign=col_sign,
+        )
+
+        slices.append((reference_slice, moving_slice, label))
+
+    # -------------------------------------------------------------
+    # Display
+    # -------------------------------------------------------------
 
     fig, axes = plt.subplots(
         3,
         3,
-        figsize=(10,10),
+        figsize=(10, 10),
         constrained_layout=True,
     )
 
     fig.suptitle(title)
 
-    headers = [
+    headers = (
         "Reference",
         "Moving",
         "Overlay",
-    ]
+    )
 
-    for j, h in enumerate(headers):
-        axes[0, j].set_title(h)
+    for column, header in enumerate(headers):
+        axes[0, column].set_title(header)
 
-    for row, (r, m, label) in enumerate(slices):
+    for row, (reference_slice, moving_slice, label) in enumerate(slices):
 
-        r = np.rot90(r)
-        m = np.rot90(m)
+        reference_slice = np.asarray(reference_slice)
+        moving_slice = np.asarray(moving_slice)
 
-        overlay = np.zeros((*r.shape,3))
-        overlay[...,0] = r
-        overlay[...,1] = m
+        overlay = np.zeros(
+            (*reference_slice.shape, 3),
+            dtype=np.float32,
+        )
 
-        axes[row,0].imshow(r, cmap="gray", origin="lower")
-        axes[row,1].imshow(m, cmap="gray", origin="lower")
-        axes[row,2].imshow(overlay, origin="lower")
+        overlay[..., 0] = reference_slice
+        overlay[..., 1] = moving_slice
 
-        axes[row,0].set_ylabel(label)
+        axes[row, 0].imshow(
+            reference_slice,
+            cmap="gray",
+            origin="lower",
+        )
+
+        axes[row, 1].imshow(
+            moving_slice,
+            cmap="gray",
+            origin="lower",
+        )
+
+        axes[row, 2].imshow(
+            overlay,
+            origin="lower",
+        )
+
+        axes[row, 0].set_ylabel(label)
 
         for ax in axes[row]:
             ax.set_xticks([])

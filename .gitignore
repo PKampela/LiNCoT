@@ -3,10 +3,14 @@ bem/
 surfaces/
 examples/
 reports/
+dist-installer/
 docsmaterial.md
 download_mne_data.py
 __pycache__/
 .vscode/
+dist/
+build/
+*.pyc
 *.nii
 *.nii.gz
 *.fif

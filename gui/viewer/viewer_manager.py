@@ -44,6 +44,10 @@ class ViewerManager:
         self._registration_callback = registration_callback
         self._viewer_backend_error: str | None = None
 
+    def set_session(self, session: Session) -> None:
+        """Replace the active session used by viewers."""
+        self._session = session
+
     def create_viewer_tab(self, viewer_type: str, title: str | None = None) -> QWidget:
         key = viewer_type.lower()
         if key not in {"base", "surface", "volume"}:
@@ -90,7 +94,7 @@ class ViewerManager:
         if hasattr(viewer_any, "load_surface"):
             viewer_any.load_surface(surface_name, surface, session=self._session)
         return viewer
-
+    
     def open_volume(self, image_name: str) -> QWidget:
         image = self._session.get_image(image_name)
         viewer = self.create_viewer_tab("volume", f"Volume: {image_name}")
@@ -141,3 +145,82 @@ class ViewerManager:
     def close_all_tabs(self) -> None:
         for index in reversed(range(self._tabs.count())):
             self.close_tab(index)
+
+    def focus_point(self, point_name: str) -> bool:
+        try:
+            point = self._session.get_point(point_name)
+        except KeyError:
+            return False
+
+        compatible_viewers: list[QWidget] = []
+
+        for index in range(self._tabs.count()):
+            viewer = self._tabs.widget(index)
+
+            if viewer is None:
+                continue
+
+            viewer_any = cast(Any, viewer)
+
+            image = getattr(viewer_any, "image", None)
+
+            if image is None:
+                continue
+
+            if image.voxel_frame == point.frame:
+                compatible_viewers.append(viewer)
+
+        if not compatible_viewers:
+            return False
+
+        active_viewer = self.active_viewer
+
+        # Prefer the currently active compatible viewer.
+        if active_viewer in compatible_viewers:
+            viewer = active_viewer
+        else:
+            # Otherwise use the first compatible open viewer.
+            viewer = compatible_viewers[0]
+
+        viewer_any = cast(Any, viewer)
+
+        if not viewer_any.focus_point(point_name):
+            return False
+
+        self._tabs.setCurrentWidget(viewer)
+        return True
+
+    def _volume_viewers(self) -> list[QWidget]:
+        viewers: list[QWidget] = []
+
+        for index in range(self._tabs.count()):
+            viewer = self._tabs.widget(index)
+
+            if viewer is None:
+                continue
+
+            viewer_any = cast(Any, viewer)
+
+            if getattr(viewer_any, "image", None) is not None:
+                viewers.append(viewer)
+
+        return viewers
+
+    def _viewer_can_focus_point(
+        self,
+        viewer: QWidget,
+        point_name: str,
+    ) -> bool:
+        viewer_any = cast(Any, viewer)
+
+        image = getattr(viewer_any, "image", None)
+
+        if image is None:
+            return False
+
+        try:
+            point = self._session.get_point(point_name)
+        except KeyError:
+            return False
+
+        return image.voxel_frame == point.frame
