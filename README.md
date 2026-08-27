@@ -1,6 +1,9 @@
-# TMSLabs
+# LiNCoT
 
-TMSLabs is a lightweight neuroimaging coordinate transformation tool for TMS workflows. It keeps coordinate frames explicit, treats transforms as first-class objects, and provides both a Python API and a stateful interactive CLI.
+LiNCoT is a lightweight neuroimaging coordinate transformation tool for TMS workflows. It keeps coordinate frames explicit, treats transforms as first-class objects, and provides both a Python API and a stateful interactive CLI.
+
+Download the latest installer here to skip manual setup
+https://github.com/PKampela/LiNCoT/releases
 
 ## Design goals
 
@@ -17,7 +20,7 @@ The repository includes a Conda environment definition in `environment.yml`.
 
 ```bash
 conda env create -f environment.yml
-conda activate tmslabs
+conda activate lincot
 ```
 
 ## Neuroimaging operations
